@@ -1,25 +1,122 @@
 # TODO-5: Claude Code Integration
 
 ## Objective
-Create a robust integration with Claude Code CLI that handles subprocess management, response streaming, session state, timeout handling, and output parsing while maintaining security and reliability.
+Create a robust integration with Claude Code that supports both CLI subprocess execution and Python SDK integration, handling response streaming, session state, timeout handling, and output parsing while maintaining security and reliability.
 
 ## Integration Architecture
 
 ### Component Overview
 ```
 Claude Integration Layer
-├── Process Manager (Subprocess handling)
+├── SDK Integration (Python SDK - Default)
+│   ├── Async SDK Client
+│   ├── Streaming Support
+│   ├── Authentication Manager
+│   └── Tool Execution Monitoring
+├── CLI Integration (Legacy subprocess)
+│   ├── Process Manager (Subprocess handling)
+│   ├── Output Parser (JSON/Stream parsing)
+│   └── Timeout Handler (Prevent hanging)
 ├── Session Manager (State persistence)
-├── Output Parser (JSON/Stream parsing)
 ├── Response Streamer (Real-time updates)
-├── Timeout Handler (Prevent hanging)
 ├── Cost Calculator (Usage tracking)
 └── Tool Monitor (Track Claude's actions)
 ```
 
 ## Core Implementation
 
-### Claude Process Manager
+### Integration Modes
+
+The bot supports two integration modes with Claude:
+
+#### SDK Integration (Default - Recommended)
+- Uses the Claude Code Python SDK for direct API integration
+- Better performance with native async support
+- Reliable streaming and error handling
+- Can use existing Claude CLI authentication or direct API key
+- Implementation in `src/claude/sdk_integration.py`
+
+#### CLI Integration (Legacy)
+- Uses Claude Code CLI as a subprocess
+- Requires Claude CLI installation and authentication
+- Legacy mode for compatibility
+- Implementation in `src/claude/integration.py`
+
+### Claude SDK Manager
+```python
+# src/claude/sdk_integration.py
+"""
+Claude Code Python SDK integration
+
+Features:
+- Native async support
+- Streaming responses
+- Direct API integration
+- CLI authentication support
+"""
+
+import asyncio
+from typing import AsyncIterator, Optional, Dict, Any
+from claude_code_sdk import query, ClaudeCodeOptions
+
+@dataclass
+class ClaudeResponse:
+    """Response from Claude Code SDK"""
+    content: str
+    session_id: str
+    cost: float
+    duration_ms: int
+    num_turns: int
+    is_error: bool = False
+    error_type: Optional[str] = None
+    tools_used: List[Dict[str, Any]] = field(default_factory=list)
+
+class ClaudeSDKManager:
+    """Manage Claude Code SDK integration"""
+    
+    def __init__(self, config: Settings):
+        self.config = config
+        self.options = ClaudeCodeOptions(
+            api_key=config.anthropic_api_key_str,
+            timeout=config.claude_timeout_seconds,
+            working_directory=config.approved_directory
+        )
+        
+    async def execute_query(
+        self,
+        prompt: str,
+        working_directory: Path,
+        session_id: Optional[str] = None,
+        stream_callback: Optional[Callable] = None
+    ) -> ClaudeResponse:
+        """Execute Claude query using SDK"""
+        
+        try:
+            # Configure options for this query
+            options = self.options.copy()
+            options.working_directory = str(working_directory)
+            
+            # Execute with streaming
+            async for update in query(prompt, options):
+                if stream_callback:
+                    await stream_callback(update)
+                    
+            # Return final response
+            return self._format_response(update, session_id)
+            
+        except Exception as e:
+            return ClaudeResponse(
+                content=f"Error: {str(e)}",
+                session_id=session_id or "unknown",
+                cost=0.0,
+                duration_ms=0,
+                num_turns=0,
+                is_error=True,
+                error_type=type(e).__name__
+            )
+```
+
+### Claude Process Manager (CLI Mode)
 ```python
 # src/claude/integration.py
 """

@@ -37,6 +37,10 @@ async def handle_callback_query(
             "action": handle_action_callback,
             "confirm": handle_confirm_callback,
             "quick": handle_quick_action_callback,
+            "followup": handle_followup_callback,
+            "conversation": handle_conversation_callback,
+            "git": handle_git_callback,
+            "export": handle_export_callback,
         }
 
         handler = handlers.get(action)
@@ -59,14 +63,14 @@ async def handle_callback_query(
 
         try:
             await query.edit_message_text(
-                f"❌ **Error Processing Action**\n\n"
+                "❌ **Error Processing Action**\n\n"
                 f"An error occurred while processing your request.\n"
                 f"Please try again or use text commands."
             )
-        except:
+        except Exception:
             # If we can't edit the message, send a new one
             await query.message.reply_text(
-                f"❌ **Error Processing Action**\n\n"
+                "❌ **Error Processing Action**\n\n"
                 f"An error occurred while processing your request."
             )
 
@@ -190,36 +194,6 @@ async def handle_action_callback(
             f"❌ **Unknown Action: {action_type}**\n\n"
             "This action is not implemented yet."
         )
-
-
-async def handle_quick_action_callback(
-    query, action_type: str, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Handle quick action buttons."""
-    quick_actions = {
-        "test": "Run all tests in the current directory",
-        "install": "Install dependencies (detect package manager and run install command)",
-        "format": "Format all code files in the current directory",
-        "lint": "Run linter on all files and show any issues",
-        "git_status": "Show git status and recent commits",
-        "find_todos": "Find all TODO, FIXME, and NOTE comments in the codebase",
-        "build": "Build the project using the appropriate build system",
-        "start": "Start the development server",
-    }
-
-    prompt = quick_actions.get(action_type)
-    if prompt:
-        await query.edit_message_text(
-            f"🚀 **Quick Action: {action_type.title()}**\n\n"
-            f"Request: _{prompt}_\n\n"
-            f"This will be processed once Claude Code integration is complete.\n\n"
-            f"**Current Status:**\n"
-            f"• Bot core: ✅ Ready\n"
-            f"• Claude integration: 🔄 In development\n\n"
-            f"_You can use text commands now to simulate this request._"
-        )
-    else:
-        await query.edit_message_text(f"❌ **Unknown Quick Action: {action_type}**")
 
 
 async def handle_confirm_callback(
@@ -510,16 +484,18 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"• Check your session status\n"
                 f"• Navigate to a different directory",
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
+                reply_markup=InlineKeyboardMarkup(
                     [
-                        InlineKeyboardButton(
-                            "🆕 New Session", callback_data="action:new_session"
-                        ),
-                        InlineKeyboardButton(
-                            "📊 Status", callback_data="action:status"
-                        ),
+                        [
+                            InlineKeyboardButton(
+                                "🆕 New Session", callback_data="action:new_session"
+                            ),
+                            InlineKeyboardButton(
+                                "📊 Status", callback_data="action:status"
+                            ),
+                        ]
                     ]
-                ])
+                ),
             )
 
     except Exception as e:
@@ -529,13 +505,15 @@ async def _handle_continue_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
             f"An error occurred: `{str(e)}`\n\n"
             f"Try starting a new session instead.",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
+            reply_markup=InlineKeyboardMarkup(
                 [
-                    InlineKeyboardButton(
-                        "🆕 New Session", callback_data="action:new_session"
-                    )
+                    [
+                        InlineKeyboardButton(
+                            "🆕 New Session", callback_data="action:new_session"
+                        )
+                    ]
                 ]
-            ])
+            ),
         )
 
 
@@ -762,6 +740,375 @@ async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Share conversations\n"
         "• Create session backups\n\n"
         "_Coming in the next development phase!_"
+    )
+
+
+async def handle_followup_callback(
+    query, suggestion_hash: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle follow-up suggestion callbacks."""
+    user_id = query.from_user.id
+
+    # Get conversation enhancer from bot data if available
+    conversation_enhancer = context.bot_data.get("conversation_enhancer")
+
+    if not conversation_enhancer:
+        await query.edit_message_text(
+            "❌ **Follow-up Not Available**\n\n"
+            "Conversation enhancement features are not available."
+        )
+        return
+
+    try:
+        # Get stored suggestions (this would need to be implemented in the enhancer)
+        # For now, we'll provide a generic response
+        await query.edit_message_text(
+            "💡 **Follow-up Suggestion Selected**\n\n"
+            "This follow-up suggestion will be implemented once the conversation "
+            "enhancement system is fully integrated with the message handler.\n\n"
+            "**Current Status:**\n"
+            "• Suggestion received ✅\n"
+            "• Integration pending 🔄\n\n"
+            "_You can continue the conversation by sending a new message._"
+        )
+
+        logger.info(
+            "Follow-up suggestion selected",
+            user_id=user_id,
+            suggestion_hash=suggestion_hash,
+        )
+
+    except Exception as e:
+        logger.error(
+            "Error handling follow-up callback",
+            error=str(e),
+            user_id=user_id,
+            suggestion_hash=suggestion_hash,
+        )
+
+        await query.edit_message_text(
+            "❌ **Error Processing Follow-up**\n\n"
+            "An error occurred while processing your follow-up suggestion."
+        )
+
+
+async def handle_conversation_callback(
+    query, action_type: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle conversation control callbacks."""
+    user_id = query.from_user.id
+    settings: Settings = context.bot_data["settings"]
+
+    if action_type == "continue":
+        # Remove suggestion buttons and show continue message
+        await query.edit_message_text(
+            "✅ **Continuing Conversation**\n\n"
+            "Send me your next message to continue coding!\n\n"
+            "I'm ready to help with:\n"
+            "• Code review and debugging\n"
+            "• Feature implementation\n"
+            "• Architecture decisions\n"
+            "• Testing and optimization\n"
+            "• Documentation\n\n"
+            "_Just type your request or upload files._"
+        )
+
+    elif action_type == "end":
+        # End the current session
+        conversation_enhancer = context.bot_data.get("conversation_enhancer")
+        if conversation_enhancer:
+            conversation_enhancer.clear_context(user_id)
+
+        # Clear session data
+        context.user_data["claude_session_id"] = None
+        context.user_data["session_started"] = False
+
+        current_dir = context.user_data.get(
+            "current_directory", settings.approved_directory
+        )
+        relative_path = current_dir.relative_to(settings.approved_directory)
+
+        # Create quick action buttons
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🆕 New Session", callback_data="action:new_session"
+                ),
+                InlineKeyboardButton(
+                    "📁 Change Project", callback_data="action:show_projects"
+                ),
+            ],
+            [
+                InlineKeyboardButton("📊 Status", callback_data="action:status"),
+                InlineKeyboardButton("❓ Help", callback_data="action:help"),
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            "✅ **Conversation Ended**\n\n"
+            f"Your Claude session has been terminated.\n\n"
+            f"**Current Status:**\n"
+            f"• Directory: `{relative_path}/`\n"
+            f"• Session: None\n"
+            f"• Ready for new commands\n\n"
+            f"**Next Steps:**\n"
+            f"• Start a new session\n"
+            f"• Check status\n"
+            f"• Send any message to begin a new conversation",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+
+        logger.info("Conversation ended via callback", user_id=user_id)
+
+    else:
+        await query.edit_message_text(
+            f"❌ **Unknown Conversation Action: {action_type}**\n\n"
+            "This conversation action is not recognized."
+        )
+
+
+async def handle_git_callback(
+    query, git_action: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle git-related callbacks."""
+    user_id = query.from_user.id
+    settings: Settings = context.bot_data["settings"]
+    features = context.bot_data.get("features")
+
+    if not features or not features.is_enabled("git"):
+        await query.edit_message_text(
+            "❌ **Git Integration Disabled**\n\n"
+            "Git integration feature is not enabled."
+        )
+        return
+
+    current_dir = context.user_data.get(
+        "current_directory", settings.approved_directory
+    )
+
+    try:
+        git_integration = features.get_git_integration()
+        if not git_integration:
+            await query.edit_message_text(
+                "❌ **Git Integration Unavailable**\n\n"
+                "Git integration service is not available."
+            )
+            return
+
+        if git_action == "status":
+            # Refresh git status
+            git_status = await git_integration.get_status(current_dir)
+            status_message = git_integration.format_status(git_status)
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 Show Diff", callback_data="git:diff"),
+                    InlineKeyboardButton("📜 Show Log", callback_data="git:log"),
+                ],
+                [
+                    InlineKeyboardButton("🔄 Refresh", callback_data="git:status"),
+                    InlineKeyboardButton("📁 Files", callback_data="action:ls"),
+                ],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                status_message, parse_mode="Markdown", reply_markup=reply_markup
+            )
+
+        elif git_action == "diff":
+            # Show git diff
+            diff_output = await git_integration.get_diff(current_dir)
+
+            if not diff_output.strip():
+                diff_message = "📊 **Git Diff**\n\n_No changes to show._"
+            else:
+                # Limit diff output
+                max_length = 2000
+                if len(diff_output) > max_length:
+                    diff_output = (
+                        diff_output[:max_length] + "\n\n_... output truncated ..._"
+                    )
+
+                diff_message = f"📊 **Git Diff**\n\n```\n{diff_output}\n```"
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("📜 Show Log", callback_data="git:log"),
+                    InlineKeyboardButton("📊 Status", callback_data="git:status"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                diff_message, parse_mode="Markdown", reply_markup=reply_markup
+            )
+
+        elif git_action == "log":
+            # Show git log
+            commits = await git_integration.get_file_history(current_dir, ".")
+
+            if not commits:
+                log_message = "📜 **Git Log**\n\n_No commits found._"
+            else:
+                log_message = "📜 **Git Log**\n\n"
+                for commit in commits[:10]:  # Show last 10 commits
+                    short_hash = commit.hash[:7]
+                    short_message = commit.message[:60]
+                    if len(commit.message) > 60:
+                        short_message += "..."
+                    log_message += f"• `{short_hash}` {short_message}\n"
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 Show Diff", callback_data="git:diff"),
+                    InlineKeyboardButton("📊 Status", callback_data="git:status"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                log_message, parse_mode="Markdown", reply_markup=reply_markup
+            )
+
+        else:
+            await query.edit_message_text(
+                f"❌ **Unknown Git Action: {git_action}**\n\n"
+                "This git action is not recognized."
+            )
+
+    except Exception as e:
+        logger.error(
+            "Error in git callback",
+            error=str(e),
+            git_action=git_action,
+            user_id=user_id,
+        )
+        await query.edit_message_text(f"❌ **Git Error**\n\n{str(e)}")
+
+
+async def handle_export_callback(
+    query, export_format: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle export format selection callbacks."""
+    user_id = query.from_user.id
+    features = context.bot_data.get("features")
+
+    if export_format == "cancel":
+        await query.edit_message_text(
+            "📤 **Export Cancelled**\n\n" "Session export has been cancelled."
+        )
+        return
+
+    session_exporter = features.get_session_export() if features else None
+    if not session_exporter:
+        await query.edit_message_text(
+            "❌ **Export Unavailable**\n\n" "Session export service is not available."
+        )
+        return
+
+    # Get current session
+    claude_session_id = context.user_data.get("claude_session_id")
+    if not claude_session_id:
+        await query.edit_message_text(
+            "❌ **No Active Session**\n\n" "There's no active session to export."
+        )
+        return
+
+    try:
+        # Show processing message
+        await query.edit_message_text(
+            f"📤 **Exporting Session**\n\n"
+            f"Generating {export_format.upper()} export...",
+            parse_mode="Markdown",
+        )
+
+        # Export session
+        exported_session = await session_exporter.export_session(
+            claude_session_id, export_format
+        )
+
+        # Send the exported file
+        from io import BytesIO
+
+        file_bytes = BytesIO(exported_session.content.encode("utf-8"))
+        file_bytes.name = exported_session.filename
+
+        await query.message.reply_document(
+            document=file_bytes,
+            filename=exported_session.filename,
+            caption=(
+                f"📤 **Session Export Complete**\n\n"
+                f"Format: {exported_session.format.upper()}\n"
+                f"Size: {exported_session.size_bytes:,} bytes\n"
+                f"Created: {exported_session.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            ),
+            parse_mode="Markdown",
+        )
+
+        # Update the original message
+        await query.edit_message_text(
+            f"✅ **Export Complete**\n\n"
+            f"Your session has been exported as {exported_session.filename}.\n"
+            f"Check the file above for your complete conversation history.",
+            parse_mode="Markdown",
+        )
+
+    except Exception as e:
+        logger.error(
+            "Export failed", error=str(e), user_id=user_id, format=export_format
+        )
+        await query.edit_message_text(f"❌ **Export Failed**\n\n{str(e)}")
+
+
+async def handle_quick_action_callback(
+    query, action_id: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle quick action callbacks."""
+    # For now, just show a message that the action isn't implemented
+    await query.edit_message_text(
+        f"❌ **Quick Action Not Implemented**\n\n"
+        f"The quick action '{action_id}' is not yet implemented.\n"
+        f"Please use text commands instead.",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_followup_callback(
+    query, action_id: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle followup action callbacks."""
+    await query.edit_message_text(
+        f"❌ **Followup Action Not Implemented**\n\n"
+        f"The followup action '{action_id}' is not yet implemented.\n"
+        f"Please use text commands instead.",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_conversation_callback(
+    query, action: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle conversation mode callbacks."""
+    await query.edit_message_text(
+        f"❌ **Conversation Action Not Implemented**\n\n"
+        f"The conversation action '{action}' is not yet implemented.\n"
+        f"Please use text commands instead.",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_export_callback(
+    query, format: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle export callbacks."""
+    await query.edit_message_text(
+        f"❌ **Export Not Implemented**\n\n"
+        f"Export to {format} format is not yet implemented.\n"
+        f"Please use text commands instead.",
+        parse_mode="Markdown",
     )
 
 

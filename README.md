@@ -107,7 +107,30 @@ The following features are partially implemented or planned:
 3. Save your bot token (it looks like `1234567890:ABC...`)
 4. Note your bot username (e.g., `my_claude_bot`)
 
-### 2. Install the Bot
+### 2. Set Up Claude Authentication
+
+Choose one of these authentication methods:
+
+**Option 1: Use existing Claude CLI login (Recommended)**
+```bash
+# Install Claude CLI
+# Follow instructions at https://claude.ai/code
+
+# Authenticate with Claude
+claude
+
+# follow the prompts to authenticate
+
+# The bot will automatically use your CLI credentials
+```
+
+**Option 2: Use API key directly**
+```bash
+# Get your API key from https://console.anthropic.com/
+# You'll add this to your .env file in the next step
+```
+
+### 3. Install the Bot
 
 ```bash
 # Clone the repository
@@ -121,7 +144,7 @@ curl -sSL https://install.python-poetry.org | python3 -
 make dev
 ```
 
-### 3. Configure Environment
+### 4. Configure Environment
 
 ```bash
 # Copy the example configuration
@@ -139,7 +162,7 @@ APPROVED_DIRECTORY=/Users/yourname/projects
 ALLOWED_USERS=123456789  # Your Telegram user ID
 ```
 
-### 4. Run the Bot
+### 5. Run the Bot
 
 ```bash
 # Start in debug mode
@@ -150,6 +173,8 @@ make run
 ```
 
 🎉 **That's it!** Message your bot on Telegram to get started.
+
+> 📋 **Detailed Setup Guide**: For comprehensive setup instructions including authentication options and troubleshooting, see [docs/setup.md](docs/setup.md)
 
 ## 📱 Usage
 
@@ -250,6 +275,8 @@ ALLOWED_USERS=123456789,987654321  # Your Telegram user ID(s)
 
 ```bash
 # Claude Settings
+USE_SDK=true                        # Use Python SDK (default) or CLI subprocess
+ANTHROPIC_API_KEY=sk-ant-api03-...  # Optional: API key for SDK (if not using CLI auth)
 CLAUDE_MAX_COST_PER_USER=10.0       # Max cost per user in USD
 CLAUDE_TIMEOUT_SECONDS=300          # Timeout for operations  
 CLAUDE_ALLOWED_TOOLS="Read,Write,Edit,Bash,Glob,Grep,LS,Task,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch"
@@ -294,10 +321,22 @@ To get your Telegram user ID for the `ALLOWED_USERS` setting:
 - ✅ Check that paths don't contain special characters
 
 **Claude integration not working:**
-- ✅ Verify Claude Code CLI is installed: `claude --version`
-- ✅ Check if you're authenticated: `claude auth status`
-- ✅ Ensure you have API credits available
+
+*If using SDK mode (USE_SDK=true, which is default):*
+- ✅ Check CLI authentication: `claude auth status`
+- ✅ If no CLI auth, verify `ANTHROPIC_API_KEY` is set in .env
+- ✅ Ensure API key has sufficient credits
+- ✅ Check logs for "SDK initialization" messages
+
+*If using CLI mode (USE_SDK=false):*
+- ✅ Verify Claude CLI is installed: `claude --version`
+- ✅ Check CLI authentication: `claude auth status`
+- ✅ Ensure CLI has sufficient credits
+
+*General troubleshooting:*
 - ✅ Verify `CLAUDE_ALLOWED_TOOLS` includes necessary tools
+- ✅ Check `CLAUDE_TIMEOUT_SECONDS` isn't too low
+- ✅ Monitor usage with `/status` command
 
 **High usage costs:**
 - ✅ Adjust `CLAUDE_MAX_COST_PER_USER` to set spending limits

@@ -9,6 +9,9 @@ This document provides detailed information for developers working on the Claude
 - Python 3.9 or higher
 - Poetry for dependency management
 - Git for version control
+- Claude authentication (one of):
+  - Claude Code CLI installed and authenticated
+  - Anthropic API key for direct SDK usage
 
 ### Initial Setup
 
@@ -328,6 +331,12 @@ For development, set these in your `.env` file:
 TELEGRAM_BOT_TOKEN=test_token_for_development
 TELEGRAM_BOT_USERNAME=test_bot
 APPROVED_DIRECTORY=/path/to/your/test/projects
+
+# Claude Integration (choose one authentication method)
+USE_SDK=true                      # Use SDK (recommended for development)
+# Option 1: Use existing Claude CLI auth (no API key needed)
+# Option 2: Direct API key
+# ANTHROPIC_API_KEY=sk-ant-api03-your-development-key
 
 # Development settings
 DEBUG=true

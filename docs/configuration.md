@@ -52,6 +52,10 @@ AUTH_TOKEN_SECRET=your-secret-key-here
 #### Claude Configuration
 
 ```bash
+# Integration Method
+USE_SDK=true                          # Use Python SDK (default) or CLI subprocess
+ANTHROPIC_API_KEY=sk-ant-api03-...    # Optional: API key for SDK integration
+
 # Maximum conversation turns before requiring new session
 CLAUDE_MAX_TURNS=10
 
@@ -60,6 +64,9 @@ CLAUDE_TIMEOUT_SECONDS=300
 
 # Maximum cost per user in USD
 CLAUDE_MAX_COST_PER_USER=10.0
+
+# Allowed Claude tools (comma-separated list)
+CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch
 ```
 
 #### Rate Limiting
@@ -319,6 +326,48 @@ This will show detailed logging of configuration loading and validation.
 - **Restrict `APPROVED_DIRECTORY`** to only necessary paths
 - **Monitor logs** for configuration errors and security events
 
+## Claude Integration Options
+
+### SDK vs CLI Mode
+
+The bot supports two integration methods with Claude:
+
+1. **SDK Mode (Default)**: Uses the Claude Code Python SDK for direct API integration
+   - Better performance and streaming support
+   - Can use existing Claude CLI authentication or API key
+   - More reliable error handling
+
+2. **CLI Mode**: Uses Claude Code CLI subprocess
+   - Requires Claude Code CLI installation
+   - Uses CLI authentication only
+   - Legacy mode for compatibility
+
+### Authentication Options
+
+#### Option 1: Use Existing Claude CLI Authentication (Recommended)
+```bash
+# Install and authenticate Claude CLI
+claude auth login
+
+# Configure bot to use SDK with CLI auth
+USE_SDK=true
+# No ANTHROPIC_API_KEY needed - SDK will use CLI credentials
+```
+
+#### Option 2: Direct API Key
+```bash
+# Configure bot with API key
+USE_SDK=true
+ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
+```
+
+#### Option 3: CLI Mode (Legacy)
+```bash
+# Use CLI subprocess instead of SDK
+USE_SDK=false
+# Requires Claude CLI to be installed and authenticated
+```
+
 ## Example .env File
 
 ```bash
@@ -334,6 +383,10 @@ ALLOWED_USERS=123456789,987654321
 ENABLE_TOKEN_AUTH=false
 AUTH_TOKEN_SECRET=
 
+# Claude Integration
+USE_SDK=true                          # Use Python SDK (recommended)
+ANTHROPIC_API_KEY=                    # Optional: Only if not using CLI auth
+
 # Rate Limiting
 RATE_LIMIT_REQUESTS=10
 RATE_LIMIT_WINDOW=60
@@ -341,6 +394,7 @@ RATE_LIMIT_WINDOW=60
 # Claude Settings
 CLAUDE_MAX_COST_PER_USER=10.0
 CLAUDE_TIMEOUT_SECONDS=300
+CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch
 
 # Storage & Database
 DATABASE_URL=sqlite:///data/bot.db

@@ -16,6 +16,73 @@ from ...security.validators import SecurityValidator
 logger = structlog.get_logger()
 
 
+async def _format_progress_update(update_obj) -> Optional[str]:
+    """Format progress updates with enhanced context and visual indicators."""
+    if update_obj.type == "tool_result":
+        # Show tool completion status
+        tool_name = "Unknown"
+        if update_obj.metadata and update_obj.metadata.get("tool_use_id"):
+            # Try to extract tool name from context if available
+            tool_name = update_obj.metadata.get("tool_name", "Tool")
+
+        if update_obj.is_error():
+            return f"❌ **{tool_name} failed**\n\n_{update_obj.get_error_message()}_"
+        else:
+            execution_time = ""
+            if update_obj.metadata and update_obj.metadata.get("execution_time_ms"):
+                time_ms = update_obj.metadata["execution_time_ms"]
+                execution_time = f" ({time_ms}ms)"
+            return f"✅ **{tool_name} completed**{execution_time}"
+
+    elif update_obj.type == "progress":
+        # Handle progress updates
+        progress_text = f"🔄 **{update_obj.content or 'Working...'}**"
+
+        percentage = update_obj.get_progress_percentage()
+        if percentage is not None:
+            # Create a simple progress bar
+            filled = int(percentage / 10)  # 0-10 scale
+            bar = "█" * filled + "░" * (10 - filled)
+            progress_text += f"\n\n`{bar}` {percentage}%"
+
+        if update_obj.progress:
+            step = update_obj.progress.get("step")
+            total_steps = update_obj.progress.get("total_steps")
+            if step and total_steps:
+                progress_text += f"\n\nStep {step} of {total_steps}"
+
+        return progress_text
+
+    elif update_obj.type == "error":
+        # Handle error messages
+        return f"❌ **Error**\n\n_{update_obj.get_error_message()}_"
+
+    elif update_obj.type == "assistant" and update_obj.tool_calls:
+        # Show when tools are being called
+        tool_names = update_obj.get_tool_names()
+        if tool_names:
+            tools_text = ", ".join(tool_names)
+            return f"🔧 **Using tools:** {tools_text}"
+
+    elif update_obj.type == "assistant" and update_obj.content:
+        # Regular content updates with preview
+        content_preview = (
+            update_obj.content[:150] + "..."
+            if len(update_obj.content) > 150
+            else update_obj.content
+        )
+        return f"🤖 **Claude is working...**\n\n_{content_preview}_"
+
+    elif update_obj.type == "system":
+        # System initialization or other system messages
+        if update_obj.metadata and update_obj.metadata.get("subtype") == "init":
+            tools_count = len(update_obj.metadata.get("tools", []))
+            model = update_obj.metadata.get("model", "Claude")
+            return f"🚀 **Starting {model}** with {tools_count} tools available"
+
+    return None
+
+
 def _format_error_message(error_str: str) -> str:
     """Format error messages for user-friendly display."""
     if "usage limit reached" in error_str.lower():
@@ -118,20 +185,12 @@ async def handle_text_message(
         # Get existing session ID
         session_id = context.user_data.get("claude_session_id")
 
-        # Stream updates handler
+        # Enhanced stream updates handler with progress tracking
         async def stream_handler(update_obj):
             try:
-                if update_obj.content:
-                    # Update progress message with streaming content
-                    content_preview = (
-                        update_obj.content[:100] + "..."
-                        if len(update_obj.content) > 100
-                        else update_obj.content
-                    )
-                    await progress_msg.edit_text(
-                        f"🤖 **Claude is working...**\n\n" f"_{content_preview}_",
-                        parse_mode="Markdown",
-                    )
+                progress_text = await _format_progress_update(update_obj)
+                if progress_text:
+                    await progress_msg.edit_text(progress_text, parse_mode="Markdown")
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
@@ -224,6 +283,52 @@ async def handle_text_message(
 
         # Update session info
         context.user_data["last_message"] = update.message.text
+
+        # Add conversation enhancements if available
+        features = context.bot_data.get("features")
+        conversation_enhancer = (
+            features.get_conversation_enhancer() if features else None
+        )
+
+        if conversation_enhancer and claude_response:
+            try:
+                # Update conversation context
+                conversation_context = conversation_enhancer.update_context(
+                    session_id=claude_response.session_id,
+                    user_id=user_id,
+                    working_directory=str(current_dir),
+                    tools_used=claude_response.tools_used or [],
+                    response_content=claude_response.content,
+                )
+
+                # Check if we should show follow-up suggestions
+                if conversation_enhancer.should_show_suggestions(
+                    claude_response.tools_used or [], claude_response.content
+                ):
+                    # Generate follow-up suggestions
+                    suggestions = conversation_enhancer.generate_follow_up_suggestions(
+                        claude_response.content,
+                        claude_response.tools_used or [],
+                        conversation_context,
+                    )
+
+                    if suggestions:
+                        # Create keyboard with suggestions
+                        suggestion_keyboard = (
+                            conversation_enhancer.create_follow_up_keyboard(suggestions)
+                        )
+
+                        # Send follow-up suggestions
+                        await update.message.reply_text(
+                            "💡 **What would you like to do next?**",
+                            parse_mode="Markdown",
+                            reply_markup=suggestion_keyboard,
+                        )
+
+            except Exception as e:
+                logger.warning(
+                    "Conversation enhancement failed", error=str(e), user_id=user_id
+                )
 
         # Log successful message processing
         if audit_logger:
@@ -324,37 +429,202 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"📄 Processing file: `{document.file_name}`...", parse_mode="Markdown"
         )
 
-        # Download and process file
-        file = await document.get_file()
-        file_bytes = await file.download_as_bytearray()
+        # Check if enhanced file handler is available
+        features = context.bot_data.get("features")
+        file_handler = features.get_file_handler() if features else None
 
-        # Try to decode as text
-        try:
-            content = file_bytes.decode("utf-8")
+        if file_handler:
+            # Use enhanced file handler
+            try:
+                processed_file = await file_handler.handle_document_upload(
+                    document,
+                    user_id,
+                    update.message.caption or "Please review this file:",
+                )
+                prompt = processed_file.prompt
 
-            # Check content length
-            max_content_length = 50000  # 50KB of text
-            if len(content) > max_content_length:
-                content = (
-                    content[:max_content_length]
-                    + "\n... (file truncated for processing)"
+                # Update progress message with file type info
+                await progress_msg.edit_text(
+                    f"📄 Processing {processed_file.type} file: `{document.file_name}`...",
+                    parse_mode="Markdown",
                 )
 
-            # Create prompt with file content
-            caption = update.message.caption or "Please review this file:"
-            prompt = (
-                f"{caption}\n\n**File:** `{document.file_name}`\n\n```\n{content}\n```"
+            except Exception as e:
+                logger.warning(
+                    "Enhanced file handler failed, falling back to basic handler",
+                    error=str(e),
+                )
+                file_handler = None  # Fall back to basic handling
+
+        if not file_handler:
+            # Fall back to basic file handling
+            file = await document.get_file()
+            file_bytes = await file.download_as_bytearray()
+
+            # Try to decode as text
+            try:
+                content = file_bytes.decode("utf-8")
+
+                # Check content length
+                max_content_length = 50000  # 50KB of text
+                if len(content) > max_content_length:
+                    content = (
+                        content[:max_content_length]
+                        + "\n... (file truncated for processing)"
+                    )
+
+                # Create prompt with file content
+                caption = update.message.caption or "Please review this file:"
+                prompt = f"{caption}\n\n**File:** `{document.file_name}`\n\n```\n{content}\n```"
+
+            except UnicodeDecodeError:
+                await progress_msg.edit_text(
+                    "❌ **File Format Not Supported**\n\n"
+                    "File must be text-based and UTF-8 encoded.\n\n"
+                    "**Supported formats:**\n"
+                    "• Source code files (.py, .js, .ts, etc.)\n"
+                    "• Text files (.txt, .md)\n"
+                    "• Configuration files (.json, .yaml, .toml)\n"
+                    "• Documentation files"
+                )
+                return
+
+        # Delete progress message
+        await progress_msg.delete()
+
+        # Create a new progress message for Claude processing
+        claude_progress_msg = await update.message.reply_text(
+            "🤖 Processing file with Claude...", parse_mode="Markdown"
+        )
+
+        # Get Claude integration from context
+        claude_integration = context.bot_data.get("claude_integration")
+
+        if not claude_integration:
+            await claude_progress_msg.edit_text(
+                "❌ **Claude integration not available**\n\n"
+                "The Claude Code integration is not properly configured.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Get current directory and session
+        current_dir = context.user_data.get(
+            "current_directory", settings.approved_directory
+        )
+        session_id = context.user_data.get("claude_session_id")
+
+        # Process with Claude
+        try:
+            claude_response = await claude_integration.run_command(
+                prompt=prompt,
+                working_directory=current_dir,
+                user_id=user_id,
+                session_id=session_id,
+            )
+
+            # Update session ID
+            context.user_data["claude_session_id"] = claude_response.session_id
+
+            # Check if Claude changed the working directory and update our tracking
+            _update_working_directory_from_claude_response(
+                claude_response, context, settings, user_id
+            )
+
+            # Format and send response
+            from ..utils.formatting import ResponseFormatter
+
+            formatter = ResponseFormatter(settings)
+            formatted_messages = formatter.format_claude_response(
+                claude_response.content
+            )
+
+            # Delete progress message
+            await claude_progress_msg.delete()
+
+            # Send responses
+            for i, message in enumerate(formatted_messages):
+                await update.message.reply_text(
+                    message.text,
+                    parse_mode=message.parse_mode,
+                    reply_markup=message.reply_markup,
+                    reply_to_message_id=(update.message.message_id if i == 0 else None),
+                )
+
+                if i < len(formatted_messages) - 1:
+                    await asyncio.sleep(0.5)
+
+        except Exception as e:
+            await claude_progress_msg.edit_text(
+                _format_error_message(str(e)), parse_mode="Markdown"
+            )
+            logger.error("Claude file processing failed", error=str(e), user_id=user_id)
+
+        # Log successful file processing
+        if audit_logger:
+            await audit_logger.log_file_access(
+                user_id=user_id,
+                file_path=document.file_name,
+                action="upload_processed",
+                success=True,
+                file_size=document.file_size,
+            )
+
+    except Exception as e:
+        try:
+            await progress_msg.delete()
+        except:
+            pass
+
+        error_msg = f"❌ **Error processing file**\n\n{str(e)}"
+        await update.message.reply_text(error_msg, parse_mode="Markdown")
+
+        # Log failed file processing
+        if audit_logger:
+            await audit_logger.log_file_access(
+                user_id=user_id,
+                file_path=document.file_name,
+                action="upload_failed",
+                success=False,
+                file_size=document.file_size,
+            )
+
+        logger.error("Error processing document", error=str(e), user_id=user_id)
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle photo uploads."""
+    user_id = update.effective_user.id
+    settings: Settings = context.bot_data["settings"]
+
+    # Check if enhanced image handler is available
+    features = context.bot_data.get("features")
+    image_handler = features.get_image_handler() if features else None
+
+    if image_handler:
+        try:
+            # Send processing indicator
+            progress_msg = await update.message.reply_text(
+                "📸 Processing image...", parse_mode="Markdown"
+            )
+
+            # Get the largest photo size
+            photo = update.message.photo[-1]
+
+            # Process image with enhanced handler
+            processed_image = await image_handler.process_image(
+                photo, update.message.caption
             )
 
             # Delete progress message
             await progress_msg.delete()
 
-            # Create a new progress message for Claude processing
+            # Create Claude progress message
             claude_progress_msg = await update.message.reply_text(
-                "🤖 Processing file with Claude...", parse_mode="Markdown"
+                "🤖 Analyzing image with Claude...", parse_mode="Markdown"
             )
 
-            # Get Claude integration from context
+            # Get Claude integration
             claude_integration = context.bot_data.get("claude_integration")
 
             if not claude_integration:
@@ -374,7 +644,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Process with Claude
             try:
                 claude_response = await claude_integration.run_command(
-                    prompt=prompt,
+                    prompt=processed_image.prompt,
                     working_directory=current_dir,
                     user_id=user_id,
                     session_id=session_id,
@@ -382,11 +652,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
                 # Update session ID
                 context.user_data["claude_session_id"] = claude_response.session_id
-
-                # Check if Claude changed the working directory and update our tracking
-                _update_working_directory_from_claude_response(
-                    claude_response, context, settings, user_id
-                )
 
                 # Format and send response
                 from ..utils.formatting import ResponseFormatter
@@ -418,66 +683,28 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     _format_error_message(str(e)), parse_mode="Markdown"
                 )
                 logger.error(
-                    "Claude file processing failed", error=str(e), user_id=user_id
+                    "Claude image processing failed", error=str(e), user_id=user_id
                 )
 
-            # Log successful file processing
-            if audit_logger:
-                await audit_logger.log_file_access(
-                    user_id=user_id,
-                    file_path=document.file_name,
-                    action="upload_processed",
-                    success=True,
-                    file_size=document.file_size,
-                )
-
-        except UnicodeDecodeError:
-            await progress_msg.edit_text(
-                "❌ **File Format Not Supported**\n\n"
-                "File must be text-based and UTF-8 encoded.\n\n"
-                "**Supported formats:**\n"
-                "• Source code files (.py, .js, .ts, etc.)\n"
-                "• Text files (.txt, .md)\n"
-                "• Configuration files (.json, .yaml, .toml)\n"
-                "• Documentation files"
+        except Exception as e:
+            logger.error("Image processing failed", error=str(e), user_id=user_id)
+            await update.message.reply_text(
+                f"❌ **Error processing image**\n\n{str(e)}", parse_mode="Markdown"
             )
-
-    except Exception as e:
-        try:
-            await progress_msg.delete()
-        except:
-            pass
-
-        error_msg = f"❌ **Error processing file**\n\n{str(e)}"
-        await update.message.reply_text(error_msg, parse_mode="Markdown")
-
-        # Log failed file processing
-        if audit_logger:
-            await audit_logger.log_file_access(
-                user_id=user_id,
-                file_path=document.file_name,
-                action="upload_failed",
-                success=False,
-                file_size=document.file_size,
-            )
-
-        logger.error("Error processing document", error=str(e), user_id=user_id)
-
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle photo uploads."""
-    await update.message.reply_text(
-        "📸 **Photo Upload**\n\n"
-        "Photo processing is not yet supported.\n\n"
-        "**Currently supported:**\n"
-        "• Text files (.py, .js, .md, etc.)\n"
-        "• Configuration files\n"
-        "• Documentation files\n\n"
-        "**Coming soon:**\n"
-        "• Image analysis\n"
-        "• Screenshot processing\n"
-        "• Diagram interpretation"
-    )
+    else:
+        # Fall back to unsupported message
+        await update.message.reply_text(
+            "📸 **Photo Upload**\n\n"
+            "Photo processing is not yet supported.\n\n"
+            "**Currently supported:**\n"
+            "• Text files (.py, .js, .md, etc.)\n"
+            "• Configuration files\n"
+            "• Documentation files\n\n"
+            "**Coming soon:**\n"
+            "• Image analysis\n"
+            "• Screenshot processing\n"
+            "• Diagram interpretation"
+        )
 
 
 def _estimate_text_processing_cost(text: str) -> float:

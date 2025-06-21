@@ -49,7 +49,19 @@ class Settings(BaseSettings):
     )
 
     # Claude settings
-    claude_binary_path: str = Field("claude", description="Path to Claude CLI binary")
+    claude_binary_path: Optional[str] = Field(
+        None, description="Path to Claude CLI binary (deprecated)"
+    )
+    claude_cli_path: Optional[str] = Field(
+        None, description="Path to Claude CLI executable"
+    )
+    anthropic_api_key: Optional[SecretStr] = Field(
+        None,
+        description="Anthropic API key for Claude SDK (optional if logged into Claude CLI)",
+    )
+    claude_model: str = Field(
+        "claude-3-5-sonnet-20241022", description="Claude model to use"
+    )
     claude_max_turns: int = Field(
         DEFAULT_CLAUDE_MAX_TURNS, description="Max conversation turns"
     )
@@ -59,6 +71,7 @@ class Settings(BaseSettings):
     claude_max_cost_per_user: float = Field(
         DEFAULT_CLAUDE_MAX_COST_PER_USER, description="Max cost per user"
     )
+    use_sdk: bool = Field(True, description="Use Python SDK instead of CLI subprocess")
     claude_allowed_tools: Optional[List[str]] = Field(
         default=[
             "Read",
@@ -220,3 +233,12 @@ class Settings(BaseSettings):
         if self.auth_token_secret:
             return self.auth_token_secret.get_secret_value()
         return None
+
+    @property
+    def anthropic_api_key_str(self) -> Optional[str]:
+        """Get Anthropic API key as string."""
+        return (
+            self.anthropic_api_key.get_secret_value()
+            if self.anthropic_api_key
+            else None
+        )

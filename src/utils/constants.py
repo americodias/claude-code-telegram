@@ -20,6 +20,9 @@ DEFAULT_MAX_SESSIONS_PER_USER = 5
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 SAFE_MESSAGE_LENGTH = 4000  # Leave room for formatting
 
+# Session limits
+MAX_SESSION_LENGTH = 1000  # Maximum messages per session
+
 # File limits
 MAX_FILE_SIZE_MB = 10
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024

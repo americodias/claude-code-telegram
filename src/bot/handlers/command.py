@@ -1,8 +1,5 @@
 """Command handlers for bot operations."""
 
-from pathlib import Path
-from typing import List
-
 import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -28,7 +25,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• `/ls` - List files in current directory\n"
         f"• `/cd <dir>` - Change directory\n"
         f"• `/projects` - Show available projects\n"
-        f"• `/status` - Show session status\n\n"
+        f"• `/status` - Show session status\n"
+        f"• `/actions` - Show quick actions\n"
+        f"• `/git` - Git repository commands\n\n"
         f"**Quick Start:**\n"
         f"1. Use `/projects` to see available projects\n"
         f"2. Use `/cd <project>` to navigate to a project\n"
@@ -78,7 +77,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• `/continue [message]` - Continue last session (optionally with message)\n"
         "• `/end` - End current session\n"
         "• `/status` - Show session and usage status\n"
-        "• `/export` - Export session history\n\n"
+        "• `/export` - Export session history\n"
+        "• `/actions` - Show context-aware quick actions\n"
+        "• `/git` - Git repository information\n\n"
         "**Usage Examples:**\n"
         "• `cd myproject` - Enter project directory\n"
         "• `ls` - See what's in current directory\n"
@@ -106,7 +107,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /new command."""
-    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
 
     # For now, we'll use a simple session concept
@@ -151,14 +151,13 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /continue command with optional prompt."""
-    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
     claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
 
     # Parse optional prompt from command arguments
     prompt = " ".join(context.args) if context.args else None
-    
+
     current_dir = context.user_data.get(
         "current_directory", settings.approved_directory
     )
@@ -211,12 +210,13 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
             # Delete status message and send response
             await status_msg.delete()
-            
+
             # Format and send Claude's response
             from ..utils.formatting import ResponseFormatter
+
             formatter = ResponseFormatter()
             formatted_messages = formatter.format_claude_response(claude_response)
-            
+
             for msg in formatted_messages:
                 await update.message.reply_text(
                     msg.content,
@@ -227,10 +227,10 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             # Log successful continue
             if audit_logger:
                 await audit_logger.log_command(
-                    user_id=user_id, 
-                    command="continue", 
-                    args=context.args or [], 
-                    success=True
+                    user_id=user_id,
+                    command="continue",
+                    args=context.args or [],
+                    success=True,
                 )
 
         else:
@@ -244,16 +244,18 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 f"• Use `/status` to check your sessions\n"
                 f"• Navigate to a different directory with `/cd`",
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
+                reply_markup=InlineKeyboardMarkup(
                     [
-                        InlineKeyboardButton(
-                            "🆕 New Session", callback_data="action:new_session"
-                        ),
-                        InlineKeyboardButton(
-                            "📊 Status", callback_data="action:status"
-                        ),
+                        [
+                            InlineKeyboardButton(
+                                "🆕 New Session", callback_data="action:new_session"
+                            ),
+                            InlineKeyboardButton(
+                                "📊 Status", callback_data="action:status"
+                            ),
+                        ]
                     ]
-                ])
+                ),
             )
 
     except Exception as e:
@@ -262,9 +264,9 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         # Delete status message if it exists
         try:
-            if 'status_msg' in locals():
+            if "status_msg" in locals():
                 await status_msg.delete()
-        except:
+        except Exception:
             pass
 
         # Send error response
@@ -282,16 +284,15 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Log failed continue
         if audit_logger:
             await audit_logger.log_command(
-                user_id=user_id, 
-                command="continue", 
-                args=context.args or [], 
-                success=False
+                user_id=user_id,
+                command="continue",
+                args=context.args or [],
+                success=False,
             )
 
 
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /ls command."""
-    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
 
@@ -383,7 +384,6 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cd command."""
-    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
     security_validator: SecurityValidator = context.bot_data.get("security_validator")
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
@@ -574,7 +574,6 @@ async def show_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /status command."""
-    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
 
     # Get session info
@@ -648,21 +647,62 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /export command."""
-    # For now, this is a placeholder since we haven't implemented session storage yet
+    user_id = update.effective_user.id
+    features = context.bot_data.get("features")
+
+    # Check if session export is available
+    session_exporter = features.get_session_export() if features else None
+
+    if not session_exporter:
+        await update.message.reply_text(
+            "📤 **Export Session**\n\n"
+            "Session export functionality is not available.\n\n"
+            "**Planned features:**\n"
+            "• Export conversation history\n"
+            "• Save session state\n"
+            "• Share conversations\n"
+            "• Create session backups"
+        )
+        return
+
+    # Get current session
+    claude_session_id = context.user_data.get("claude_session_id")
+
+    if not claude_session_id:
+        await update.message.reply_text(
+            "❌ **No Active Session**\n\n"
+            "There's no active Claude session to export.\n\n"
+            "**What you can do:**\n"
+            "• Start a new session with `/new`\n"
+            "• Continue an existing session with `/continue`\n"
+            "• Check your status with `/status`"
+        )
+        return
+
+    # Create export format selection keyboard
+    keyboard = [
+        [
+            InlineKeyboardButton("📝 Markdown", callback_data="export:markdown"),
+            InlineKeyboardButton("🌐 HTML", callback_data="export:html"),
+        ],
+        [
+            InlineKeyboardButton("📋 JSON", callback_data="export:json"),
+            InlineKeyboardButton("❌ Cancel", callback_data="export:cancel"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
         "📤 **Export Session**\n\n"
-        "Session export functionality will be available once the storage layer is implemented.\n\n"
-        "This will allow you to:\n"
-        "• Export conversation history\n"
-        "• Save session state\n"
-        "• Share conversations\n"
-        "• Create session backups"
+        f"Ready to export session: `{claude_session_id[:8]}...`\n\n"
+        "**Choose export format:**",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
     )
 
 
 async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /end command to terminate the current session."""
-    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
 
     # Check if there's an active session
@@ -721,6 +761,163 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
     logger.info("Session ended by user", user_id=user_id, session_id=claude_session_id)
+
+
+async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /actions command to show quick actions."""
+    settings: Settings = context.bot_data["settings"]
+    features = context.bot_data.get("features")
+
+    if not features or not features.is_enabled("quick_actions"):
+        await update.message.reply_text(
+            "❌ **Quick Actions Disabled**\n\n"
+            "Quick actions feature is not enabled.\n"
+            "Contact your administrator to enable this feature."
+        )
+        return
+
+    # Get current directory
+    current_dir = context.user_data.get(
+        "current_directory", settings.approved_directory
+    )
+
+    try:
+        quick_action_manager = features.get_quick_actions()
+        if not quick_action_manager:
+            await update.message.reply_text(
+                "❌ **Quick Actions Unavailable**\n\n"
+                "Quick actions service is not available."
+            )
+            return
+
+        # Get context-aware actions
+        actions = await quick_action_manager.get_suggestions(
+            session_data={"working_directory": str(current_dir), "user_id": user_id}
+        )
+
+        if not actions:
+            await update.message.reply_text(
+                "🤖 **No Actions Available**\n\n"
+                "No quick actions are available for the current context.\n\n"
+                "**Try:**\n"
+                "• Navigating to a project directory with `/cd`\n"
+                "• Creating some code files\n"
+                "• Starting a Claude session with `/new`"
+            )
+            return
+
+        # Create inline keyboard
+        keyboard = quick_action_manager.create_inline_keyboard(actions, max_columns=2)
+
+        relative_path = current_dir.relative_to(settings.approved_directory)
+        await update.message.reply_text(
+            f"⚡ **Quick Actions**\n\n"
+            f"📂 Context: `{relative_path}/`\n\n"
+            f"Select an action to execute:",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ **Error Loading Actions**\n\n{str(e)}")
+        logger.error("Error in quick_actions command", error=str(e), user_id=user_id)
+
+
+async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /git command to show git repository information."""
+    settings: Settings = context.bot_data["settings"]
+    features = context.bot_data.get("features")
+
+    if not features or not features.is_enabled("git"):
+        await update.message.reply_text(
+            "❌ **Git Integration Disabled**\n\n"
+            "Git integration feature is not enabled.\n"
+            "Contact your administrator to enable this feature."
+        )
+        return
+
+    # Get current directory
+    current_dir = context.user_data.get(
+        "current_directory", settings.approved_directory
+    )
+
+    try:
+        git_integration = features.get_git_integration()
+        if not git_integration:
+            await update.message.reply_text(
+                "❌ **Git Integration Unavailable**\n\n"
+                "Git integration service is not available."
+            )
+            return
+
+        # Check if current directory is a git repository
+        if not (current_dir / ".git").exists():
+            await update.message.reply_text(
+                f"📂 **Not a Git Repository**\n\n"
+                f"Current directory `{current_dir.relative_to(settings.approved_directory)}/` is not a git repository.\n\n"
+                f"**Options:**\n"
+                f"• Navigate to a git repository with `/cd`\n"
+                f"• Initialize a new repository (ask Claude to help)\n"
+                f"• Clone an existing repository (ask Claude to help)"
+            )
+            return
+
+        # Get git status
+        git_status = await git_integration.get_status(current_dir)
+
+        # Format status message
+        relative_path = current_dir.relative_to(settings.approved_directory)
+        status_message = f"🔗 **Git Repository Status**\n\n"
+        status_message += f"📂 Directory: `{relative_path}/`\n"
+        status_message += f"🌿 Branch: `{git_status.branch}`\n"
+
+        if git_status.ahead > 0:
+            status_message += f"⬆️ Ahead: {git_status.ahead} commits\n"
+        if git_status.behind > 0:
+            status_message += f"⬇️ Behind: {git_status.behind} commits\n"
+
+        # Show file changes
+        if git_status.has_changes():
+            status_message += f"\n**Changes:**\n"
+            if git_status.modified:
+                status_message += f"📝 Modified: {len(git_status.modified)} files\n"
+            if git_status.added:
+                status_message += f"➕ Added: {len(git_status.added)} files\n"
+            if git_status.deleted:
+                status_message += f"➖ Deleted: {len(git_status.deleted)} files\n"
+            if git_status.untracked:
+                status_message += f"❓ Untracked: {len(git_status.untracked)} files\n"
+        else:
+            status_message += "\n✅ Working directory clean\n"
+
+        # Show recent commits
+        if git_status.recent_commits:
+            status_message += f"\n**Recent Commits:**\n"
+            for commit in git_status.recent_commits[:3]:  # Show last 3
+                short_hash = commit.hash[:7]
+                status_message += f"• `{short_hash}` {commit.message[:50]}{'...' if len(commit.message) > 50 else ''}\n"
+
+        # Create action buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Show Diff", callback_data="git:diff"),
+                InlineKeyboardButton("📜 Show Log", callback_data="git:log"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data="git:status"),
+                InlineKeyboardButton("📁 Files", callback_data="action:ls"),
+            ],
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            status_message, parse_mode="Markdown", reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ **Git Error**\n\n{str(e)}")
+        logger.error("Error in git_command", error=str(e), user_id=user_id)
 
 
 def _format_file_size(size: int) -> str:

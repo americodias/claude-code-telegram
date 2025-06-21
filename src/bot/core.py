@@ -23,6 +23,7 @@ from telegram.ext import (
 
 from ..config.settings import Settings
 from ..exceptions import ClaudeCodeTelegramError
+from .features.registry import FeatureRegistry
 
 logger = structlog.get_logger()
 
@@ -36,6 +37,7 @@ class ClaudeCodeBot:
         self.deps = dependencies
         self.app: Optional[Application] = None
         self.is_running = False
+        self.feature_registry: Optional[FeatureRegistry] = None
 
     async def initialize(self) -> None:
         """Initialize bot application."""
@@ -52,6 +54,16 @@ class ClaudeCodeBot:
         builder.pool_timeout(30)
 
         self.app = builder.build()
+
+        # Initialize feature registry
+        self.feature_registry = FeatureRegistry(
+            config=self.settings,
+            storage=self.deps.get("storage"),
+            security=self.deps.get("security"),
+        )
+
+        # Add feature registry to dependencies
+        self.deps["features"] = self.feature_registry
 
         # Set bot commands for menu
         await self._set_bot_commands()
@@ -80,6 +92,8 @@ class ClaudeCodeBot:
             BotCommand("projects", "Show all projects"),
             BotCommand("status", "Show session status"),
             BotCommand("export", "Export current session"),
+            BotCommand("actions", "Show quick actions"),
+            BotCommand("git", "Git repository commands"),
         ]
 
         await self.app.bot.set_my_commands(commands)
@@ -102,6 +116,8 @@ class ClaudeCodeBot:
             ("projects", command.show_projects),
             ("status", command.session_status),
             ("export", command.export_session),
+            ("actions", command.quick_actions),
+            ("git", command.git_command),
         ]
 
         for cmd, handler in handlers:
@@ -256,6 +272,10 @@ class ClaudeCodeBot:
 
         try:
             self.is_running = False  # Stop the main loop first
+
+            # Shutdown feature registry
+            if self.feature_registry:
+                self.feature_registry.shutdown()
 
             if self.app:
                 # Stop the updater if it's running

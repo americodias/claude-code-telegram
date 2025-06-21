@@ -11,6 +11,7 @@ import asyncio
 import json
 import uuid
 from asyncio.subprocess import Process
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
@@ -43,21 +44,63 @@ class ClaudeResponse:
 
 @dataclass
 class StreamUpdate:
-    """Streaming update from Claude."""
+    """Enhanced streaming update from Claude with richer context."""
 
-    type: str  # 'assistant', 'user', 'system', 'result'
+    type: str  # 'assistant', 'user', 'system', 'result', 'tool_result', 'error', 'progress'
     content: Optional[str] = None
     tool_calls: Optional[List[Dict]] = None
     metadata: Optional[Dict] = None
 
+    # Enhanced fields for better tracking
+    timestamp: Optional[str] = None
+    session_context: Optional[Dict] = None
+    progress: Optional[Dict] = None
+    error_info: Optional[Dict] = None
+
+    # Execution tracking
+    execution_id: Optional[str] = None
+    parent_message_id: Optional[str] = None
+
+    def is_error(self) -> bool:
+        """Check if this update represents an error."""
+        return self.type == "error" or (
+            self.metadata and self.metadata.get("is_error", False)
+        )
+
+    def get_tool_names(self) -> List[str]:
+        """Extract tool names from tool calls."""
+        if not self.tool_calls:
+            return []
+        return [call.get("name") for call in self.tool_calls if call.get("name")]
+
+    def get_progress_percentage(self) -> Optional[int]:
+        """Get progress percentage if available."""
+        if self.progress:
+            return self.progress.get("percentage")
+        return None
+
+    def get_error_message(self) -> Optional[str]:
+        """Get error message if this is an error update."""
+        if self.error_info:
+            return self.error_info.get("message")
+        elif self.is_error() and self.content:
+            return self.content
+        return None
+
 
 class ClaudeProcessManager:
-    """Manage Claude Code subprocess execution."""
+    """Manage Claude Code subprocess execution with memory optimization."""
 
     def __init__(self, config: Settings):
         """Initialize process manager with configuration."""
         self.config = config
         self.active_processes: Dict[str, Process] = {}
+
+        # Memory optimization settings
+        self.max_message_buffer = 1000  # Limit message history
+        self.streaming_buffer_size = (
+            65536  # 64KB streaming buffer for large JSON messages
+        )
 
     async def execute_command(
         self,
@@ -185,30 +228,52 @@ class ClaudeProcessManager:
     async def _handle_process_output(
         self, process: Process, stream_callback: Optional[Callable]
     ) -> ClaudeResponse:
-        """Handle streaming output from Claude Code."""
-        messages = []
+        """Memory-optimized output handling with bounded buffers."""
+        message_buffer = deque(maxlen=self.max_message_buffer)
         result = None
+        parsing_errors = []
 
-        async for line in self._read_stream(process.stdout):
+        async for line in self._read_stream_bounded(process.stdout):
             try:
                 msg = json.loads(line)
-                messages.append(msg)
 
-                # Create stream update
+                # Enhanced validation
+                if not self._validate_message_structure(msg):
+                    parsing_errors.append(f"Invalid message structure: {line[:100]}")
+                    continue
+
+                message_buffer.append(msg)
+
+                # Process immediately to avoid memory buildup
                 update = self._parse_stream_message(msg)
                 if update and stream_callback:
                     try:
                         await stream_callback(update)
                     except Exception as e:
-                        logger.warning("Stream callback failed", error=str(e))
+                        logger.warning(
+                            "Stream callback failed",
+                            error=str(e),
+                            update_type=update.type,
+                        )
 
                 # Check for final result
                 if msg.get("type") == "result":
                     result = msg
 
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse JSON line", line=line)
+            except json.JSONDecodeError as e:
+                parsing_errors.append(f"JSON decode error: {e}")
+                logger.warning(
+                    "Failed to parse JSON line", line=line[:200], error=str(e)
+                )
                 continue
+
+        # Enhanced error reporting
+        if parsing_errors:
+            logger.warning(
+                "Parsing errors encountered",
+                count=len(parsing_errors),
+                errors=parsing_errors[:5],
+            )
 
         # Wait for process to complete
         return_code = await process.wait()
@@ -259,7 +324,7 @@ class ClaudeProcessManager:
             logger.error("No result message received from Claude Code")
             raise ClaudeParsingError("No result message received from Claude Code")
 
-        return self._parse_result(result, messages)
+        return self._parse_result(result, list(message_buffer))
 
     async def _read_stream(self, stream) -> AsyncIterator[str]:
         """Read lines from stream."""
@@ -269,44 +334,187 @@ class ClaudeProcessManager:
                 break
             yield line.decode("utf-8", errors="replace").strip()
 
+    async def _read_stream_bounded(self, stream) -> AsyncIterator[str]:
+        """Read stream with memory bounds to prevent excessive memory usage."""
+        buffer = b""
+
+        while True:
+            chunk = await stream.read(self.streaming_buffer_size)
+            if not chunk:
+                break
+
+            buffer += chunk
+
+            # Process complete lines
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                yield line.decode("utf-8", errors="replace").strip()
+
+        # Process remaining buffer
+        if buffer:
+            yield buffer.decode("utf-8", errors="replace").strip()
+
     def _parse_stream_message(self, msg: Dict) -> Optional[StreamUpdate]:
-        """Parse streaming message into update."""
+        """Enhanced parsing with comprehensive message type support."""
         msg_type = msg.get("type")
 
+        # Add support for more message types
         if msg_type == "assistant":
-            # Extract content and tool calls
-            message = msg.get("message", {})
-            content_blocks = message.get("content", [])
+            return self._parse_assistant_message(msg)
+        elif msg_type == "tool_result":
+            return self._parse_tool_result_message(msg)
+        elif msg_type == "user":
+            return self._parse_user_message(msg)
+        elif msg_type == "system":
+            return self._parse_system_message(msg)
+        elif msg_type == "error":
+            return self._parse_error_message(msg)
+        elif msg_type == "progress":
+            return self._parse_progress_message(msg)
 
-            # Get text content
-            text_content = []
-            tool_calls = []
+        # Unknown message type - log and continue
+        logger.debug("Unknown message type", msg_type=msg_type, msg=msg)
+        return None
 
-            for block in content_blocks:
-                if block.get("type") == "text":
-                    text_content.append(block.get("text", ""))
-                elif block.get("type") == "tool_use":
-                    tool_calls.append(
-                        {"name": block.get("name"), "input": block.get("input", {})}
-                    )
+    def _parse_assistant_message(self, msg: Dict) -> StreamUpdate:
+        """Parse assistant message with enhanced context."""
+        message = msg.get("message", {})
+        content_blocks = message.get("content", [])
 
-            return StreamUpdate(
-                type="assistant",
-                content="\n".join(text_content) if text_content else None,
-                tool_calls=tool_calls if tool_calls else None,
-            )
+        # Get text content
+        text_content = []
+        tool_calls = []
 
-        elif msg_type == "system" and msg.get("subtype") == "init":
+        for block in content_blocks:
+            if block.get("type") == "text":
+                text_content.append(block.get("text", ""))
+            elif block.get("type") == "tool_use":
+                tool_calls.append(
+                    {
+                        "name": block.get("name"),
+                        "input": block.get("input", {}),
+                        "id": block.get("id"),
+                    }
+                )
+
+        return StreamUpdate(
+            type="assistant",
+            content="\n".join(text_content) if text_content else None,
+            tool_calls=tool_calls if tool_calls else None,
+            timestamp=msg.get("timestamp"),
+            session_context={"session_id": msg.get("session_id")},
+            execution_id=msg.get("id"),
+        )
+
+    def _parse_tool_result_message(self, msg: Dict) -> StreamUpdate:
+        """Parse tool execution results."""
+        result = msg.get("result", {})
+        content = result.get("content") if isinstance(result, dict) else str(result)
+
+        return StreamUpdate(
+            type="tool_result",
+            content=content,
+            metadata={
+                "tool_use_id": msg.get("tool_use_id"),
+                "is_error": (
+                    result.get("is_error", False) if isinstance(result, dict) else False
+                ),
+                "execution_time_ms": (
+                    result.get("execution_time_ms")
+                    if isinstance(result, dict)
+                    else None
+                ),
+            },
+            timestamp=msg.get("timestamp"),
+            session_context={"session_id": msg.get("session_id")},
+            error_info={"message": content} if result.get("is_error", False) else None,
+        )
+
+    def _parse_user_message(self, msg: Dict) -> StreamUpdate:
+        """Parse user message."""
+        message = msg.get("message", {})
+        content = message.get("content", "")
+
+        # Handle both string and block format content
+        if isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    text_parts.append(block)
+            content = "\n".join(text_parts)
+
+        return StreamUpdate(
+            type="user",
+            content=content if content else None,
+            timestamp=msg.get("timestamp"),
+            session_context={"session_id": msg.get("session_id")},
+        )
+
+    def _parse_system_message(self, msg: Dict) -> StreamUpdate:
+        """Parse system messages including init and other subtypes."""
+        subtype = msg.get("subtype")
+
+        if subtype == "init":
             # Initial system message with available tools
             return StreamUpdate(
                 type="system",
                 metadata={
+                    "subtype": "init",
                     "tools": msg.get("tools", []),
                     "mcp_servers": msg.get("mcp_servers", []),
+                    "model": msg.get("model"),
+                    "cwd": msg.get("cwd"),
+                    "permission_mode": msg.get("permissionMode"),
                 },
+                session_context={"session_id": msg.get("session_id")},
+            )
+        else:
+            # Other system messages
+            return StreamUpdate(
+                type="system",
+                content=msg.get("message", str(msg)),
+                metadata={"subtype": subtype},
+                timestamp=msg.get("timestamp"),
+                session_context={"session_id": msg.get("session_id")},
             )
 
-        return None
+    def _parse_error_message(self, msg: Dict) -> StreamUpdate:
+        """Parse error messages."""
+        error_message = msg.get("message", msg.get("error", str(msg)))
+
+        return StreamUpdate(
+            type="error",
+            content=error_message,
+            error_info={
+                "message": error_message,
+                "code": msg.get("code"),
+                "subtype": msg.get("subtype"),
+            },
+            timestamp=msg.get("timestamp"),
+            session_context={"session_id": msg.get("session_id")},
+        )
+
+    def _parse_progress_message(self, msg: Dict) -> StreamUpdate:
+        """Parse progress update messages."""
+        return StreamUpdate(
+            type="progress",
+            content=msg.get("message", msg.get("status")),
+            progress={
+                "percentage": msg.get("percentage"),
+                "step": msg.get("step"),
+                "total_steps": msg.get("total_steps"),
+                "operation": msg.get("operation"),
+            },
+            timestamp=msg.get("timestamp"),
+            session_context={"session_id": msg.get("session_id")},
+        )
+
+    def _validate_message_structure(self, msg: Dict) -> bool:
+        """Validate message has required structure."""
+        required_fields = ["type"]
+        return all(field in msg for field in required_fields)
 
     def _parse_result(self, result: Dict, messages: List[Dict]) -> ClaudeResponse:
         """Parse final result message."""

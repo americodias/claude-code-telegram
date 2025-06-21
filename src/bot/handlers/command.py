@@ -151,6 +151,7 @@ async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /continue command with optional prompt."""
+    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
     claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
@@ -293,6 +294,7 @@ async def continue_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /ls command."""
+    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
 
@@ -384,6 +386,7 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cd command."""
+    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
     security_validator: SecurityValidator = context.bot_data.get("security_validator")
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
@@ -574,6 +577,7 @@ async def show_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /status command."""
+    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
 
     # Get session info
@@ -703,6 +707,7 @@ async def export_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /end command to terminate the current session."""
+    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
 
     # Check if there's an active session
@@ -765,6 +770,7 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /actions command to show quick actions."""
+    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
     features = context.bot_data.get("features")
 
@@ -825,6 +831,7 @@ async def quick_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /git command to show git repository information."""
+    user_id = update.effective_user.id
     settings: Settings = context.bot_data["settings"]
     features = context.bot_data.get("features")
 

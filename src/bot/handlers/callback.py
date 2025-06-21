@@ -64,14 +64,14 @@ async def handle_callback_query(
         try:
             await query.edit_message_text(
                 "❌ **Error Processing Action**\n\n"
-                f"An error occurred while processing your request.\n"
-                f"Please try again or use text commands."
+                "An error occurred while processing your request.\n"
+                "Please try again or use text commands."
             )
         except Exception:
             # If we can't edit the message, send a new one
             await query.message.reply_text(
                 "❌ **Error Processing Action**\n\n"
-                f"An error occurred while processing your request."
+                "An error occurred while processing your request."
             )
 
 
@@ -743,6 +743,83 @@ async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+async def handle_quick_action_callback(
+    query, action_id: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle quick action callbacks."""
+    user_id = query.from_user.id
+
+    # Get quick actions manager from bot data if available
+    quick_actions = context.bot_data.get("quick_actions")
+
+    if not quick_actions:
+        await query.edit_message_text(
+            "❌ **Quick Actions Not Available**\n\n"
+            "Quick actions feature is not available."
+        )
+        return
+
+    # Get Claude integration
+    claude_integration: ClaudeIntegration = context.bot_data.get("claude_integration")
+    if not claude_integration:
+        await query.edit_message_text(
+            "❌ **Claude Integration Not Available**\n\n"
+            "Claude integration is not properly configured."
+        )
+        return
+
+    settings: Settings = context.bot_data["settings"]
+    current_dir = context.user_data.get(
+        "current_directory", settings.approved_directory
+    )
+
+    try:
+        # Get the action from the manager
+        action = quick_actions.actions.get(action_id)
+        if not action:
+            await query.edit_message_text(
+                f"❌ **Action Not Found**\n\n"
+                f"Quick action '{action_id}' is not available."
+            )
+            return
+
+        # Execute the action
+        await query.edit_message_text(
+            f"🚀 **Executing {action.icon} {action.name}**\n\n"
+            f"Running quick action in directory: `{current_dir.relative_to(settings.approved_directory)}/`\n\n"
+            f"Please wait...",
+            parse_mode="Markdown",
+        )
+
+        # Run the action through Claude
+        claude_response = await claude_integration.run_command(
+            prompt=action.prompt, working_directory=current_dir, user_id=user_id
+        )
+
+        if claude_response:
+            # Format and send the response
+            response_text = claude_response.content
+            if len(response_text) > 4000:
+                response_text = response_text[:4000] + "...\n\n_(Response truncated)_"
+
+            await query.message.reply_text(
+                f"✅ **{action.icon} {action.name} Complete**\n\n{response_text}",
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ **Action Failed**\n\n"
+                f"Failed to execute {action.name}. Please try again."
+            )
+
+    except Exception as e:
+        logger.error("Quick action execution failed", error=str(e), user_id=user_id)
+        await query.edit_message_text(
+            f"❌ **Action Error**\n\n"
+            f"An error occurred while executing {action_id}: {str(e)}"
+        )
+
+
 async def handle_followup_callback(
     query, suggestion_hash: str, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1061,55 +1138,6 @@ async def handle_export_callback(
             "Export failed", error=str(e), user_id=user_id, format=export_format
         )
         await query.edit_message_text(f"❌ **Export Failed**\n\n{str(e)}")
-
-
-async def handle_quick_action_callback(
-    query, action_id: str, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Handle quick action callbacks."""
-    # For now, just show a message that the action isn't implemented
-    await query.edit_message_text(
-        f"❌ **Quick Action Not Implemented**\n\n"
-        f"The quick action '{action_id}' is not yet implemented.\n"
-        f"Please use text commands instead.",
-        parse_mode="Markdown",
-    )
-
-
-async def handle_followup_callback(
-    query, action_id: str, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Handle followup action callbacks."""
-    await query.edit_message_text(
-        f"❌ **Followup Action Not Implemented**\n\n"
-        f"The followup action '{action_id}' is not yet implemented.\n"
-        f"Please use text commands instead.",
-        parse_mode="Markdown",
-    )
-
-
-async def handle_conversation_callback(
-    query, action: str, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Handle conversation mode callbacks."""
-    await query.edit_message_text(
-        f"❌ **Conversation Action Not Implemented**\n\n"
-        f"The conversation action '{action}' is not yet implemented.\n"
-        f"Please use text commands instead.",
-        parse_mode="Markdown",
-    )
-
-
-async def handle_export_callback(
-    query, format: str, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Handle export callbacks."""
-    await query.edit_message_text(
-        f"❌ **Export Not Implemented**\n\n"
-        f"Export to {format} format is not yet implemented.\n"
-        f"Please use text commands instead.",
-        parse_mode="Markdown",
-    )
 
 
 def _format_file_size(size: int) -> str:

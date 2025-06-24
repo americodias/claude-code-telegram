@@ -20,7 +20,7 @@ def test_settings_validation_required_fields(monkeypatch):
     monkeypatch.delenv("APPROVED_DIRECTORY", raising=False)
 
     with pytest.raises(ValidationError) as exc_info:
-        Settings()
+        Settings(_env_file=None)
 
     errors = exc_info.value.errors()
     required_fields = {error["loc"][0] for error in errors}
@@ -234,6 +234,9 @@ def test_computed_properties(tmp_path):
 
 def test_feature_flags():
     """Test feature flag system."""
+    # Create test MCP config file before creating settings
+    Path("/tmp/test.json").write_text('{"test": true}')
+
     settings = create_test_config(
         enable_mcp=True,
         mcp_config_path="/tmp/test.json",
@@ -242,9 +245,6 @@ def test_feature_flags():
         enable_token_auth=True,
         auth_token_secret="secret",
     )
-
-    # Create test MCP config file
-    Path("/tmp/test.json").write_text('{"test": true}')
 
     features = FeatureFlags(settings)
 
@@ -262,6 +262,9 @@ def test_feature_flags():
     # Test generic feature check
     assert features.is_feature_enabled("git") is True
     assert features.is_feature_enabled("nonexistent") is False
+
+    # Cleanup test file
+    Path("/tmp/test.json").unlink(missing_ok=True)
 
 
 def test_environment_loading():

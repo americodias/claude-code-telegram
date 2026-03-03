@@ -10,6 +10,8 @@ Features:
 
 import base64
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional
 
 from telegram import PhotoSize
@@ -38,36 +40,39 @@ class ImageHandler:
     async def process_image(
         self, photo: PhotoSize, caption: Optional[str] = None
     ) -> ProcessedImage:
-        """Process uploaded image"""
+        """Process uploaded image — save to vault .tmp/ and tell Claude to read it."""
 
         # Download image
         file = await photo.get_file()
         image_bytes = await file.download_as_bytearray()
 
-        # Detect image type
-        image_type = self._detect_image_type(image_bytes)
+        image_format = self._detect_format(image_bytes)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
+        filename = f"telegram_{timestamp}.{image_format}"
 
-        # Create appropriate prompt
-        if image_type == "screenshot":
-            prompt = self._create_screenshot_prompt(caption)
-        elif image_type == "diagram":
-            prompt = self._create_diagram_prompt(caption)
-        elif image_type == "ui_mockup":
-            prompt = self._create_ui_prompt(caption)
-        else:
-            prompt = self._create_generic_prompt(caption)
+        # Save inside APPROVED_DIRECTORY so Claude's sandbox allows reads.
+        # .tmp/ is gitignored and invisible to Obsidian (dot-prefix folder).
+        save_dir = Path(self.config.approved_directory) / ".tmp"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / filename
+        save_path.write_bytes(image_bytes)
 
-        # Convert to base64 for Claude (if supported in future)
-        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+        # Relative path from vault root — how Claude navigates the vault
+        relative_path = f".tmp/{filename}"
+
+        prompt = f"The user sent an image. I've saved it to `{relative_path}`. Please read and analyze it."
+        if caption:
+            prompt += f"\n\nCaption from user: {caption}"
 
         return ProcessedImage(
             prompt=prompt,
-            image_type=image_type,
-            base64_data=base64_image,
+            image_type=image_format,
+            base64_data="",
             size=len(image_bytes),
             metadata={
-                "format": self._detect_format(image_bytes),
+                "format": image_format,
                 "has_caption": caption is not None,
+                "path": str(save_path),
             },
         )
 

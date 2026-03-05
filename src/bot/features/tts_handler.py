@@ -1,8 +1,9 @@
 """
 Convert text to speech via OpenAI, ElevenLabs, or Piper (Wyoming) TTS.
 
-Follows the same lazy-init + .tmp/ pattern as voice_handler.py.
 Provider is selected via TTS_PROVIDER setting (openai | elevenlabs | piper).
+When pair_dir is provided (voice conversation), saves to the same timestamped
+folder as the received audio. Otherwise saves to .media.telegram/audios/.
 """
 
 import asyncio
@@ -29,7 +30,8 @@ _ELEVENLABS_CHAR_LIMIT = 5000
 class TtsResult:
     """Result of a TTS synthesis."""
 
-    audio_path: str  # absolute path in .tmp/
+    audio_path: str  # absolute path to audio file
+    transcript_path: str  # absolute path to transcript .txt
     chunks: int  # how many API calls were made
 
 
@@ -63,20 +65,25 @@ class TtsHandler:
             self._elevenlabs_client = AsyncElevenLabs(api_key=api_key)
         return self._elevenlabs_client
 
-    async def synthesise(self, text: str) -> TtsResult:
-        """Convert text to an audio file. Returns path to the file."""
+    async def synthesise(self, text: str, pair_dir: str | None = None) -> TtsResult:
+        """Convert text to an audio file. Returns path to the file.
+
+        Args:
+            text: The text to synthesise (may contain markup — stripped internally).
+            pair_dir: If provided, save into this directory as sent.* (paired with received.*).
+        """
         plain = _strip_markup(text)
         if not plain:
             raise ValueError("No speakable text after stripping markup.")
 
         provider = self.config.tts_provider.lower()
         if provider == "elevenlabs":
-            return await self._synthesise_elevenlabs(plain)
+            return await self._synthesise_elevenlabs(plain, pair_dir)
         if provider == "piper":
-            return await self._synthesise_piper(plain)
-        return await self._synthesise_openai(plain)
+            return await self._synthesise_piper(plain, pair_dir)
+        return await self._synthesise_openai(plain, pair_dir)
 
-    async def _synthesise_openai(self, text: str) -> TtsResult:
+    async def _synthesise_openai(self, text: str, pair_dir: str | None = None) -> TtsResult:
         """Synthesise via OpenAI TTS API."""
         chunks = _split_text(text, _OPENAI_CHAR_LIMIT)
         client = self._get_openai_client()
@@ -92,7 +99,7 @@ class TtsHandler:
             audio_parts.append(await response.aread())
 
         audio_bytes = b"".join(audio_parts)
-        save_path = self._save_audio(audio_bytes, "ogg")
+        save_path, transcript_path = self._save_audio(audio_bytes, "ogg", text, pair_dir)
 
         logger.info(
             "TTS audio saved (openai)",
@@ -100,9 +107,9 @@ class TtsHandler:
             size_bytes=len(audio_bytes),
             chunks=len(chunks),
         )
-        return TtsResult(audio_path=str(save_path), chunks=len(chunks))
+        return TtsResult(audio_path=str(save_path), transcript_path=str(transcript_path), chunks=len(chunks))
 
-    async def _synthesise_elevenlabs(self, text: str) -> TtsResult:
+    async def _synthesise_elevenlabs(self, text: str, pair_dir: str | None = None) -> TtsResult:
         """Synthesise via ElevenLabs TTS API."""
         chunks = _split_text(text, _ELEVENLABS_CHAR_LIMIT)
         client = self._get_elevenlabs_client()
@@ -122,7 +129,7 @@ class TtsHandler:
             audio_parts.append(chunk_bytes)
 
         audio_bytes = b"".join(audio_parts)
-        save_path = self._save_audio(audio_bytes, "mp3")
+        save_path, transcript_path = self._save_audio(audio_bytes, "mp3", text, pair_dir)
 
         logger.info(
             "TTS audio saved (elevenlabs)",
@@ -130,9 +137,9 @@ class TtsHandler:
             size_bytes=len(audio_bytes),
             chunks=len(chunks),
         )
-        return TtsResult(audio_path=str(save_path), chunks=len(chunks))
+        return TtsResult(audio_path=str(save_path), transcript_path=str(transcript_path), chunks=len(chunks))
 
-    async def _synthesise_piper(self, text: str) -> TtsResult:
+    async def _synthesise_piper(self, text: str, pair_dir: str | None = None) -> TtsResult:
         """Synthesise via Piper TTS over Wyoming protocol."""
         from wyoming.audio import AudioChunk, AudioStart, AudioStop
         from wyoming.client import AsyncTcpClient
@@ -192,7 +199,7 @@ class TtsHandler:
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg conversion failed: {stderr.decode()[:200]}")
 
-        save_path = self._save_audio(ogg_bytes, "ogg")
+        save_path, transcript_path = self._save_audio(ogg_bytes, "ogg", text, pair_dir)
 
         logger.info(
             "TTS audio saved (piper)",
@@ -201,16 +208,21 @@ class TtsHandler:
             pcm_bytes=len(pcm_bytes),
             rate=rate,
         )
-        return TtsResult(audio_path=str(save_path), chunks=1)
+        return TtsResult(audio_path=str(save_path), transcript_path=str(transcript_path), chunks=1)
 
-    def _save_audio(self, audio_bytes: bytes, ext: str) -> Path:
-        """Save audio bytes to .tmp/ directory."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
-        save_dir = Path(self.config.approved_directory) / ".tmp"
+    def _save_audio(self, audio_bytes: bytes, ext: str, text: str, pair_dir: str | None = None) -> tuple[Path, Path]:
+        """Save audio + transcript. Returns (audio_path, transcript_path)."""
+        if pair_dir:
+            save_dir = Path(pair_dir)
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_dir = Path(self.config.approved_directory) / ".media.telegram" / "audios" / timestamp
         save_dir.mkdir(parents=True, exist_ok=True)
-        save_path = save_dir / f"tts_{timestamp}.{ext}"
+        save_path = save_dir / f"sent.{ext}"
         save_path.write_bytes(audio_bytes)
-        return save_path
+        transcript_path = save_dir / "sent.txt"
+        transcript_path.write_text(text, encoding="utf-8")
+        return save_path, transcript_path
 
 
 def _strip_markup(text: str) -> str:

@@ -5,7 +5,8 @@ Supports:
 - Telegram VOICE messages (microphone button, OGG Opus)
 - Telegram AUDIO messages (forwarded audio files, MP3/M4A/etc.)
 
-Follows the same save-to-.tmp/ pattern as image_handler.py.
+Media saved to .media.telegram/audios/<timestamp>/ as paired conversations
+(received audio + transcript, sent audio + transcript).
 """
 
 import io
@@ -35,6 +36,8 @@ class ProcessedVoice:
     size_bytes: int
     audio_format: str
     saved_path: Optional[str] = None
+    transcript_path: Optional[str] = None
+    pair_dir: Optional[str] = None
 
 
 class VoiceHandler:
@@ -93,17 +96,17 @@ class VoiceHandler:
         tg_file = await attachment.get_file()
         audio_bytes = await tg_file.download_as_bytearray()
 
-        # 4. Save to .tmp/ (inside APPROVED_DIRECTORY — within Claude's sandbox)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
-        filename = f"voice_{timestamp}.{audio_format}"
-        save_dir = Path(self.config.approved_directory) / ".tmp"
-        save_dir.mkdir(parents=True, exist_ok=True)
-        save_path = save_dir / filename
+        # 4. Save to .media.telegram/audios/<timestamp>/ as a paired conversation folder
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pair_dir = Path(self.config.approved_directory) / ".media.telegram" / "audios" / timestamp
+        pair_dir.mkdir(parents=True, exist_ok=True)
+        save_path = pair_dir / f"received.{audio_format}"
         save_path.write_bytes(audio_bytes)
 
         logger.info(
             "Audio saved",
             path=str(save_path),
+            pair_dir=str(pair_dir),
             size_bytes=len(audio_bytes),
             duration=duration,
             format=audio_format,
@@ -112,7 +115,7 @@ class VoiceHandler:
         # 5. Transcribe via Whisper API
         client = self._get_client()
         audio_buffer = io.BytesIO(bytes(audio_bytes))
-        audio_buffer.name = filename  # Whisper uses the extension for format detection
+        audio_buffer.name = f"received.{audio_format}"  # Whisper uses the extension for format detection
 
         whisper_kwargs: dict[str, Any] = {
             "model": "whisper-1",
@@ -123,6 +126,10 @@ class VoiceHandler:
 
         transcription = await client.audio.transcriptions.create(**whisper_kwargs)
         transcript = transcription.text.strip()
+
+        # Save transcript alongside audio
+        transcript_path = pair_dir / "received.txt"
+        transcript_path.write_text(transcript, encoding="utf-8")
 
         logger.info(
             "Voice transcribed",
@@ -158,6 +165,8 @@ class VoiceHandler:
             size_bytes=len(audio_bytes),
             audio_format=audio_format,
             saved_path=str(save_path),
+            transcript_path=str(transcript_path),
+            pair_dir=str(pair_dir),
         )
 
 

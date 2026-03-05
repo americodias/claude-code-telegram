@@ -51,14 +51,14 @@ class ImageHandler:
         filename = f"telegram_{timestamp}.{image_format}"
 
         # Save inside APPROVED_DIRECTORY so Claude's sandbox allows reads.
-        # .tmp/ is gitignored and invisible to Obsidian (dot-prefix folder).
-        save_dir = Path(self.config.approved_directory) / ".tmp"
+        # .media.telegram/ is gitignored and invisible to Obsidian (dot-prefix folder).
+        save_dir = Path(self.config.approved_directory) / ".media.telegram" / "images"
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / filename
         save_path.write_bytes(image_bytes)
 
         # Relative path from vault root — how Claude navigates the vault
-        relative_path = f".tmp/{filename}"
+        relative_path = f".media.telegram/images/{filename}"
 
         prompt = f"The user sent an image. I've saved it to `{relative_path}`. Please read and analyze it."
         if caption:

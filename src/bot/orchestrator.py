@@ -1459,17 +1459,14 @@ class MessageOrchestrator:
                 try:
                     full_text = "\n\n".join(m.text for m in formatted_messages)
                     await chat.send_action("record_voice")
-                    tts_result = await tts_handler.synthesise(full_text)
+                    tts_result = await tts_handler.synthesise(
+                        full_text, pair_dir=processed_voice.pair_dir
+                    )
                     with open(tts_result.audio_path, "rb") as audio_file:
                         await update.message.reply_voice(
                             voice=audio_file,
                             reply_to_message_id=update.message.message_id,
                         )
-                    # Clean up temp file
-                    try:
-                        Path(tts_result.audio_path).unlink()
-                    except Exception:
-                        pass
                     tts_sent = True
                     logger.info(
                         "TTS voice reply sent",

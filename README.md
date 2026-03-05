@@ -194,6 +194,8 @@ Enable with `ENABLE_API_SERVER=true` and `ENABLE_SCHEDULER=true`. See [docs/setu
 - Directory sandboxing with path traversal prevention
 - File upload handling with archive extraction
 - Image/screenshot upload with analysis
+- Voice message transcription via OpenAI Whisper
+- Text-to-speech voice replies with multi-provider support (OpenAI, ElevenLabs, Piper/Wyoming)
 - Git integration with safe repository operations
 - Quick actions system with context-aware buttons
 - Session export in Markdown, HTML, and JSON formats
@@ -244,6 +246,33 @@ RATE_LIMIT_WINDOW=60             # Window in seconds
 ENABLE_GIT_INTEGRATION=true
 ENABLE_FILE_UPLOADS=true
 ENABLE_QUICK_ACTIONS=true
+```
+
+### Voice & Text-to-Speech
+
+Send voice messages to the bot and receive spoken replies. Whisper transcribes your audio, Claude processes it, and TTS converts the response back to a voice note.
+
+```bash
+# Voice transcription (requires OpenAI API key)
+OPENAI_API_KEY=sk-...            # Used for Whisper transcription
+WHISPER_LANGUAGE=pt              # ISO 639-1 hint for better accuracy (optional)
+
+# Text-to-Speech
+TTS_ENABLED=true                 # Enable voice replies (default: false)
+TTS_PROVIDER=elevenlabs          # openai | elevenlabs | piper
+
+# OpenAI TTS (default provider)
+TTS_VOICE=alloy                  # alloy, echo, fable, onyx, nova, shimmer
+TTS_MODEL=tts-1                  # tts-1 or tts-1-hd
+
+# ElevenLabs TTS
+ELEVENLABS_API_KEY=...           # ElevenLabs API key
+ELEVENLABS_VOICE_ID=...          # Voice ID from ElevenLabs voice library
+ELEVENLABS_MODEL=eleven_multilingual_v2  # Best for multilingual content
+
+# Piper TTS (self-hosted via Wyoming protocol)
+PIPER_HOST=192.168.1.100         # Wyoming server host
+PIPER_PORT=10200                 # Wyoming server port (requires ffmpeg)
 ```
 
 ### Agentic Platform

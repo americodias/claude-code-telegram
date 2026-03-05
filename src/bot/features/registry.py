@@ -77,6 +77,41 @@ class FeatureRegistry:
         except Exception as e:
             logger.error("Failed to initialize image handler", error=str(e))
 
+        # Voice transcription - requires OPENAI_API_KEY
+        if self.config.openai_api_key:
+            try:
+                from .voice_handler import VoiceHandler
+
+                self.features["voice_handler"] = VoiceHandler(config=self.config)
+                logger.info("Voice handler feature enabled")
+            except Exception as e:
+                logger.error("Failed to initialize voice handler", error=str(e))
+        else:
+            logger.info("Voice handler disabled — OPENAI_API_KEY not set")
+
+        # TTS voice replies - requires API key for the chosen provider + tts_enabled
+        tts_provider = self.config.tts_provider.lower()
+        tts_has_key = (
+            (tts_provider == "elevenlabs" and self.config.elevenlabs_api_key)
+            or (tts_provider == "openai" and self.config.openai_api_key)
+            or (tts_provider == "piper")
+        )
+        if tts_has_key and self.config.tts_enabled:
+            try:
+                from .tts_handler import TtsHandler
+
+                self.features["tts_handler"] = TtsHandler(config=self.config)
+                logger.info("TTS handler feature enabled", provider=tts_provider)
+            except Exception as e:
+                logger.error("Failed to initialize TTS handler", error=str(e))
+        elif not tts_has_key:
+            logger.info(
+                "TTS handler disabled — API key not set for provider",
+                provider=tts_provider,
+            )
+        else:
+            logger.info("TTS handler disabled — TTS_ENABLED=false")
+
         # Conversation enhancements - skip in agentic mode
         if not self.config.agentic_mode:
             try:
@@ -117,6 +152,14 @@ class FeatureRegistry:
     def get_image_handler(self) -> Optional[ImageHandler]:
         """Get image handler feature"""
         return self.get_feature("image_handler")
+
+    def get_voice_handler(self) -> Optional[Any]:
+        """Get voice handler feature"""
+        return self.get_feature("voice_handler")
+
+    def get_tts_handler(self) -> Optional[Any]:
+        """Get TTS handler feature"""
+        return self.get_feature("tts_handler")
 
     def get_conversation_enhancer(self) -> Optional[ConversationEnhancer]:
         """Get conversation enhancer feature"""

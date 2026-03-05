@@ -336,6 +336,24 @@ class MessageOrchestrator:
             group=10,
         )
 
+        # Voice messages (microphone button) -> transcribe via Whisper -> Claude
+        app.add_handler(
+            MessageHandler(filters.VOICE, self._inject_deps(self.agentic_voice)),
+            group=10,
+        )
+
+        # Audio files (forwarded audio) -> transcribe via Whisper -> Claude
+        app.add_handler(
+            MessageHandler(filters.AUDIO, self._inject_deps(self.agentic_voice)),
+            group=10,
+        )
+
+        # Catch-all: forward unrecognized /commands (vault skills) to Claude
+        app.add_handler(
+            MessageHandler(filters.COMMAND, self._inject_deps(self.agentic_text)),
+            group=15,
+        )
+
         # Only cd: callbacks (for project selection), scoped by pattern
         app.add_handler(
             CallbackQueryHandler(
@@ -1328,6 +1346,166 @@ class MessageOrchestrator:
             await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
             logger.error(
                 "Claude photo processing failed", error=str(e), user_id=user_id
+            )
+
+    async def agentic_voice(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Process voice/audio message -> transcribe via Whisper -> Claude."""
+        user_id = update.effective_user.id
+
+        features = context.bot_data.get("features")
+        voice_handler = features.get_voice_handler() if features else None
+
+        if not voice_handler:
+            await update.message.reply_text(
+                "Voice transcription is not available. "
+                "Set OPENAI_API_KEY to enable it."
+            )
+            return
+
+        # Determine attachment type: VOICE (microphone) vs AUDIO (forwarded file)
+        is_voice = update.message.voice is not None
+        attachment = update.message.voice or update.message.audio
+
+        if not attachment:
+            await update.message.reply_text("Could not read audio attachment.")
+            return
+
+        chat = update.message.chat
+        await chat.send_action("typing")
+        progress_msg = await update.message.reply_text("🎙 Transcribing...")
+
+        try:
+            processed_voice = await voice_handler.process_voice(
+                attachment,
+                caption=update.message.caption,
+                is_voice=is_voice,
+            )
+        except ValueError as e:
+            # Size limit or format error — user-facing message
+            await progress_msg.edit_text(str(e))
+            return
+        except Exception as e:
+            logger.error(
+                "Voice transcription failed", error=str(e), user_id=user_id
+            )
+            await progress_msg.edit_text(
+                "Transcription failed. Please try again or send text directly."
+            )
+            return
+
+        # From here: same flow as agentic_photo / agentic_text
+        try:
+            claude_integration = context.bot_data.get("claude_integration")
+            if not claude_integration:
+                await progress_msg.edit_text(
+                    "Claude integration not available. Check configuration."
+                )
+                return
+
+            current_dir = context.user_data.get(
+                "current_directory", self.settings.approved_directory
+            )
+            session_id = context.user_data.get("claude_session_id")
+            force_new = bool(context.user_data.get("force_new_session"))
+
+            verbose_level = self._get_verbose_level(context)
+            tool_log: List[Dict[str, Any]] = []
+            mcp_images_voice: List[ImageAttachment] = []
+            on_stream = self._make_stream_callback(
+                verbose_level,
+                progress_msg,
+                tool_log,
+                time.time(),
+                mcp_images=mcp_images_voice,
+                approved_directory=self.settings.approved_directory,
+            )
+
+            heartbeat = self._start_typing_heartbeat(chat)
+            try:
+                claude_response = await claude_integration.run_command(
+                    prompt=processed_voice.prompt,
+                    working_directory=current_dir,
+                    user_id=user_id,
+                    session_id=session_id,
+                    on_stream=on_stream,
+                    force_new=force_new,
+                )
+            finally:
+                heartbeat.cancel()
+
+            if force_new:
+                context.user_data["force_new_session"] = False
+
+            context.user_data["claude_session_id"] = claude_response.session_id
+
+            from .utils.formatting import ResponseFormatter
+
+            formatter = ResponseFormatter(self.settings)
+            formatted_messages = formatter.format_claude_response(
+                claude_response.content
+            )
+
+            try:
+                await progress_msg.delete()
+            except Exception:
+                logger.debug("Failed to delete progress message, ignoring")
+
+            # TTS voice reply — send audio instead of text when available
+            tts_handler = features.get_tts_handler() if features else None
+            tts_sent = False
+            if tts_handler and formatted_messages:
+                try:
+                    full_text = "\n\n".join(m.text for m in formatted_messages)
+                    await chat.send_action("record_voice")
+                    tts_result = await tts_handler.synthesise(full_text)
+                    with open(tts_result.audio_path, "rb") as audio_file:
+                        await update.message.reply_voice(
+                            voice=audio_file,
+                            reply_to_message_id=update.message.message_id,
+                        )
+                    # Clean up temp file
+                    try:
+                        Path(tts_result.audio_path).unlink()
+                    except Exception:
+                        pass
+                    tts_sent = True
+                    logger.info(
+                        "TTS voice reply sent",
+                        user_id=user_id,
+                        chunks=tts_result.chunks,
+                    )
+                except Exception as tts_err:
+                    # Non-fatal — fall through to send text instead
+                    logger.warning(
+                        "TTS synthesis failed",
+                        error=str(tts_err),
+                        user_id=user_id,
+                    )
+
+            if not tts_sent:
+                # Send full text reply (fallback or no TTS)
+                for i, message in enumerate(formatted_messages):
+                    await update.message.reply_text(
+                        message.text,
+                        parse_mode=message.parse_mode,
+                        reply_markup=None,
+                        reply_to_message_id=(
+                            update.message.message_id if i == 0 else None
+                        ),
+                    )
+                    if i < len(formatted_messages) - 1:
+                        await asyncio.sleep(0.5)
+
+        except Exception as e:
+            from .handlers.message import _format_error_message
+
+            await progress_msg.edit_text(
+                _format_error_message(e), parse_mode="HTML"
+            )
+            logger.error(
+                "Claude voice processing failed", error=str(e), user_id=user_id
             )
 
     async def agentic_repo(

@@ -90,6 +90,13 @@ class Settings(BaseSettings):
         "openai",
         description="TTS provider: openai, elevenlabs, or piper",
     )
+    tts_provider_chain: str = Field(
+        "",
+        description=(
+            "Comma-separated TTS provider fallback chain "
+            "(e.g. 'elevenlabs,piper,openai'). Overrides tts_provider when set."
+        ),
+    )
     tts_voice: str = Field(
         "nova",
         description="OpenAI TTS voice (alloy, echo, fable, onyx, nova, shimmer)",
@@ -121,6 +128,10 @@ class Settings(BaseSettings):
     piper_port: int = Field(
         10200,
         description="Piper TTS Wyoming protocol port",
+    )
+    piper_voice: str = Field(
+        "",
+        description="Piper voice name (e.g. pt_BR-faber-medium). Empty = server default.",
     )
     claude_model: str = Field(
         "claude-3-5-sonnet-20241022", description="Claude model to use"
@@ -205,6 +216,16 @@ class Settings(BaseSettings):
     )
     max_sessions_per_user: int = Field(
         DEFAULT_MAX_SESSIONS_PER_USER, description="Max concurrent sessions"
+    )
+    session_daily_reset_hour: Optional[int] = Field(
+        default=None,
+        description="Hour of day (0-23) to force session reset. None = disabled.",
+        ge=0,
+        le=23,
+    )
+    session_daily_reset_timezone: str = Field(
+        default="UTC",
+        description="Timezone for daily reset hour (e.g. 'Europe/Lisbon')",
     )
 
     # Features
@@ -499,3 +520,8 @@ class Settings(BaseSettings):
             if self.elevenlabs_api_key
             else None
         )
+
+    @property
+    def reboot_flag_path(self) -> Path:
+        """Path to the reboot flag file for self-reboot awareness."""
+        return self.approved_directory / ".cortex" / "data" / "last-reboot.json"

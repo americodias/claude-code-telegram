@@ -98,7 +98,7 @@ The bot supports two interaction modes:
 
 The default conversational mode. Just talk to Claude naturally -- no special commands required.
 
-**Commands:** `/start`, `/new`, `/status`, `/verbose`, `/repo`
+**Commands:** `/start`, `/new`, `/status`, `/verbose`, `/repo`, `/tts`
 If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`
 
 ```
@@ -207,6 +207,10 @@ Enable with `ENABLE_API_SERVER=true` and `ENABLE_SCHEDULER=true`. See [docs/setu
 - Job scheduler with cron expressions and persistent storage
 - Notification service with per-chat rate limiting
 
+- Automatic skill discovery from project `.claude/skills/` directories (registered as Telegram commands)
+- Auto-`/init` on new sessions to bootstrap project context
+- Daily session reset at a configurable hour (lazy expiry on next message)
+- Graceful reboot awareness with flag file for restart notifications
 - Tunable verbose output showing Claude's tool usage and reasoning in real-time
 - Persistent typing indicator so users always know the bot is working
 - 16 configurable tools with allowlist/disallowlist control (see [docs/tools.md](docs/tools.md))
@@ -260,6 +264,8 @@ WHISPER_LANGUAGE=pt              # ISO 639-1 hint for better accuracy (optional)
 # Text-to-Speech
 TTS_ENABLED=true                 # Enable voice replies (default: false)
 TTS_PROVIDER=elevenlabs          # openai | elevenlabs | piper
+TTS_PROVIDER_CHAIN=elevenlabs,openai  # Fallback chain (overrides TTS_PROVIDER)
+                                       # Auto-retries next provider on failure (5min cooldown)
 
 # OpenAI TTS (default provider)
 TTS_VOICE=alloy                  # alloy, echo, fable, onyx, nova, shimmer
@@ -292,6 +298,30 @@ ENABLE_SCHEDULER=false           # Enable cron job scheduler
 # Notifications
 NOTIFICATION_CHAT_IDS=123,456    # Default chat IDs for proactive notifications
 ```
+
+### Session Management
+
+```bash
+# Daily session reset (forces a fresh Claude session after this hour)
+SESSION_DAILY_RESET_HOUR=3            # Hour of day (0-23). None = disabled
+SESSION_DAILY_RESET_TIMEZONE=Europe/Lisbon  # Timezone for reset hour (default: UTC)
+
+# Session limits
+CLAUDE_MAX_TURNS=30                   # Max turns per session (default: 10)
+CLAUDE_TIMEOUT_SECONDS=600            # Operation timeout (default: 300)
+```
+
+Daily reset uses lazy expiry -- sessions that cross the reset hour are treated as expired on the next message (no background scheduler).
+
+### Skill Discovery
+
+The bot automatically discovers Claude Code skills from the project's `.claude/skills/` directory and registers them as Telegram commands. Each skill's `SKILL.md` frontmatter (`name`, `description`) is used to build the command menu.
+
+When a new session starts, the bot auto-runs `/init` (if the skill exists) to bootstrap project context.
+
+### Graceful Reboots
+
+The bot supports a reboot flag file mechanism for zero-downtime restarts. When the flag file is detected at startup, the bot sends a notification to the configured chat and cleans up the flag.
 
 ### Project Threads Mode
 

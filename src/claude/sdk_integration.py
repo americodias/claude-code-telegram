@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     ProcessError,
     ResultMessage,
+    ThinkingBlock,
     ToolPermissionContext,
     ToolUseBlock,
     UserMessage,
@@ -465,6 +466,10 @@ class ClaudeSDKManager:
 
                 if content and isinstance(content, list):
                     for block in content:
+                        # Skip thinking blocks — internal reasoning,
+                        # never shown to the user.
+                        if isinstance(block, ThinkingBlock):
+                            continue
                         if isinstance(block, ToolUseBlock):
                             tool_calls.append(
                                 {
@@ -484,10 +489,21 @@ class ClaudeSDKManager:
                     )
                     await stream_callback(update)
                 elif content:
-                    # Fallback for non-list content
+                    # Fallback for non-list content — filter out
+                    # thinking blocks to avoid leaking internal reasoning.
+                    if isinstance(content, list):
+                        visible = [
+                            b for b in content
+                            if not isinstance(b, ThinkingBlock)
+                        ]
+                        if not visible:
+                            return
+                        fallback_text = str(visible)
+                    else:
+                        fallback_text = str(content)
                     update = StreamUpdate(
                         type="assistant",
-                        content=str(content),
+                        content=fallback_text,
                     )
                     await stream_callback(update)
 

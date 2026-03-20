@@ -115,6 +115,10 @@ class MessageOrchestrator:
         self.settings = settings
         self.deps = deps
 
+        # Discover Claude Code skills from project directory
+        from .features.skill_discovery import discover_skills
+        self._skills = discover_skills(settings.approved_directory)
+
     def _inject_deps(self, handler: Callable) -> Callable:  # type: ignore[type-arg]
         """Wrap handler to inject dependencies into context.bot_data."""
 
@@ -306,6 +310,7 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
+            ("tts", self.agentic_tts),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -349,8 +354,16 @@ class MessageOrchestrator:
         )
 
         # Catch-all: forward unrecognized /commands (vault skills) to Claude
+        # Exclude commands already handled above to prevent double-firing.
+        known_commands = {cmd for cmd, _ in handlers}
+        known_filter = filters.Regex(
+            rf"^/({'|'.join(known_commands)})(\s|$|@)"
+        )
         app.add_handler(
-            MessageHandler(filters.COMMAND, self._inject_deps(self.agentic_text)),
+            MessageHandler(
+                filters.COMMAND & ~known_filter,
+                self._inject_deps(self.agentic_text),
+            ),
             group=15,
         )
 
@@ -421,9 +434,16 @@ class MessageOrchestrator:
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("repo", "List repos / switch workspace"),
+                BotCommand("tts", "TTS provider status / switch"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
+            # Add discovered Claude Code skills
+            for name, skill in self._skills.items():
+                desc = skill.description[:50]
+                if skill.argument_hint:
+                    desc = f"{desc} ({skill.argument_hint})"
+                commands.append(BotCommand(name, desc[:256]))
             return commands
         else:
             commands = [
@@ -504,12 +524,33 @@ class MessageOrchestrator:
     async def agentic_new(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Reset session, one-line confirmation."""
+        """Reset session. Auto-runs /init if available in the project."""
         context.user_data["claude_session_id"] = None
         context.user_data["session_started"] = True
         context.user_data["force_new_session"] = True
 
-        await update.message.reply_text("Session reset. What's next?")
+        # Re-scan skills (project may have changed)
+        from .features.skill_discovery import discover_skills
+        self._skills = discover_skills(self.settings.approved_directory)
+        # Update Telegram command menu
+        try:
+            await context.bot.set_my_commands(await self.get_bot_commands())
+        except Exception:
+            pass
+
+        # Check if /init skill exists (project-agnostic)
+        init_skill_path = (
+            self.settings.approved_directory / ".claude" / "skills" / "init" / "SKILL.md"
+        )
+        if not init_skill_path.exists():
+            await update.message.reply_text("Session reset. What's next?")
+            return
+
+        # Auto-run /init to load project context
+        await self._run_claude_and_reply(
+            update, context, "/init", force_new=True,
+            status_text="Session reset. Loading context...",
+        )
 
     async def agentic_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -580,6 +621,47 @@ class MessageOrchestrator:
             f"Verbosity set to <b>{level}</b> ({labels[level]})",
             parse_mode="HTML",
         )
+
+    async def agentic_tts(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """TTS provider management: /tts, /tts next, /tts <name>."""
+        features = context.bot_data.get("features")
+        tts_handler = features.get_tts_handler() if features else None
+
+        if not tts_handler:
+            await update.message.reply_text("TTS is not available.")
+            return
+
+        args = update.message.text.split()[1:] if update.message.text else []
+
+        if not args:
+            # Show status
+            status = tts_handler.get_status()
+            chain_str = " \u2192 ".join(status["chain"])
+            lines = [
+                f"<b>TTS Provider:</b> {status['current']}",
+                f"<b>Chain:</b> {chain_str}",
+            ]
+            if status["failed"]:
+                for provider, info in status["failed"].items():
+                    lines.append(f"<b>{provider}:</b> {info}")
+            lines.append("\nUsage: <code>/tts next</code> or <code>/tts &lt;name&gt;</code>")
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            return
+
+        arg = args[0].lower()
+        try:
+            if arg == "next":
+                new_provider = tts_handler.next_provider()
+            else:
+                new_provider = tts_handler.switch_provider(arg)
+            await update.message.reply_text(
+                f"TTS switched to <b>{new_provider}</b>",
+                parse_mode="HTML",
+            )
+        except ValueError as e:
+            await update.message.reply_text(str(e))
 
     def _format_verbose_progress(
         self,
@@ -837,6 +919,103 @@ class MessageOrchestrator:
 
         return caption_sent
 
+    async def _run_claude_and_reply(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        prompt: str,
+        force_new: bool = False,
+        status_text: str = "Working...",
+    ) -> None:
+        """Run a prompt through Claude and send the formatted reply.
+
+        Shared by agentic_new (auto /init) and potentially other handlers
+        that need to trigger a Claude call programmatically.
+        """
+        user_id = update.effective_user.id
+        chat = update.message.chat
+        await chat.send_action("typing")
+        progress_msg = await update.message.reply_text(status_text)
+
+        claude_integration = context.bot_data.get("claude_integration")
+        if not claude_integration:
+            await progress_msg.edit_text(
+                f"{status_text.rstrip('.')} (Claude not available)"
+            )
+            return
+
+        current_dir = context.user_data.get(
+            "current_directory", self.settings.approved_directory
+        )
+        session_id = context.user_data.get("claude_session_id")
+
+        verbose_level = self._get_verbose_level(context)
+        tool_log: List[Dict[str, Any]] = []
+        start_time = time.time()
+        on_stream = self._make_stream_callback(
+            verbose_level, progress_msg, tool_log, start_time,
+        )
+
+        heartbeat = self._start_typing_heartbeat(chat)
+        try:
+            claude_response = await claude_integration.run_command(
+                prompt=prompt,
+                working_directory=current_dir,
+                user_id=user_id,
+                session_id=session_id,
+                on_stream=on_stream,
+                force_new=force_new,
+            )
+
+            if force_new:
+                context.user_data["force_new_session"] = False
+            context.user_data["claude_session_id"] = claude_response.session_id
+
+            from .utils.formatting import ResponseFormatter
+
+            formatter = ResponseFormatter(self.settings)
+            formatted_messages = formatter.format_claude_response(
+                claude_response.content
+            )
+
+            try:
+                await progress_msg.delete()
+            except Exception:
+                pass
+
+            for i, message in enumerate(formatted_messages):
+                if not message.text or not message.text.strip():
+                    continue
+                try:
+                    await update.message.reply_text(
+                        message.text,
+                        parse_mode=message.parse_mode,
+                        reply_markup=None,
+                        reply_to_message_id=(
+                            update.message.message_id if i == 0 else None
+                        ),
+                    )
+                    if i < len(formatted_messages) - 1:
+                        await asyncio.sleep(0.5)
+                except Exception:
+                    await update.message.reply_text(
+                        message.text,
+                        reply_markup=None,
+                        reply_to_message_id=(
+                            update.message.message_id if i == 0 else None
+                        ),
+                    )
+        except Exception as e:
+            logger.error("Claude call failed", error=str(e), user_id=user_id)
+            try:
+                await progress_msg.edit_text(
+                    f"{status_text.rstrip('.')} failed. Session is ready."
+                )
+            except Exception:
+                pass
+        finally:
+            heartbeat.cancel()
+
     async def agentic_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -879,6 +1058,33 @@ class MessageOrchestrator:
         # Check if /new was used — skip auto-resume for this first message.
         # Flag is only cleared after a successful run so retries keep the intent.
         force_new = bool(context.user_data.get("force_new_session"))
+
+        # Inject reboot awareness into first message after reboot
+        from datetime import datetime, timezone
+        reboot_info = context.bot_data.get("reboot_info")
+        if reboot_info:
+            try:
+                reboot_time = datetime.fromisoformat(reboot_info["timestamp"])
+                age = int((datetime.now(timezone.utc) - reboot_time).total_seconds())
+                reason = reboot_info.get("reason", "unknown")
+                message_text = (
+                    f"[SYSTEM: Bot was rebooted {age}s ago. "
+                    f"Reason: {reason}. Do NOT attempt another reboot.]\n\n"
+                    f"{message_text}"
+                )
+            except Exception:
+                pass
+            context.bot_data.pop("reboot_info", None)
+
+        # Inject current timestamp so Claude has time awareness
+        from zoneinfo import ZoneInfo
+        try:
+            tz_name = self.settings.session_daily_reset_timezone or "Europe/Lisbon"
+            now_local = datetime.now(ZoneInfo(tz_name))
+            time_str = now_local.strftime("%Y-%m-%d %H:%M %Z")
+            message_text = f"[Current time: {time_str}]\n\n{message_text}"
+        except Exception:
+            pass
 
         # --- Verbose progress tracking via stream callback ---
         tool_log: List[Dict[str, Any]] = []

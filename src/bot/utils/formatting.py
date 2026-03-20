@@ -38,6 +38,9 @@ class ResponseFormatter:
         self, text: str, context: Optional[dict] = None
     ) -> List[FormattedMessage]:
         """Enhanced formatting with context awareness and semantic chunking."""
+        # Keep original for fallback
+        original_text = text
+
         # Clean and prepare text
         text = self._clean_text(text)
 
@@ -61,17 +64,27 @@ class ResponseFormatter:
         # Filter out any empty messages produced by formatting/splitting
         messages = [m for m in messages if m.text and m.text.strip()]
 
-        return (
-            messages
-            if messages
-            else [FormattedMessage("<i>(No content to display)</i>")]
-        )
+        if messages:
+            return messages
+
+        # Fallback: if formatting corrupted the content, show raw text
+        # in a <pre> block rather than "(No content to display)"
+        if original_text and original_text.strip():
+            escaped = escape_html(original_text.strip())
+            # Truncate if extremely long
+            if len(escaped) > self.max_message_length - 30:
+                escaped = escaped[: self.max_message_length - 50] + "\n… (truncated)"
+            return [FormattedMessage(f"<pre>{escaped}</pre>")]
+
+        return [FormattedMessage("<i>(No content to display)</i>")]
 
     def _should_use_semantic_chunking(self, text: str) -> bool:
         """Determine if semantic chunking is needed."""
         # Use semantic chunking for complex content with multiple code blocks,
-        # file operations, or very long text
-        code_block_count = text.count("```")
+        # file operations, or very long text.
+        # After _clean_text, fenced blocks are already converted to <pre><code>,
+        # so count both raw markdown fences and HTML code blocks.
+        code_block_count = text.count("```") + text.count("<pre>")
         has_file_operations = any(
             indicator in text
             for indicator in [
@@ -218,8 +231,14 @@ class ResponseFormatter:
         in_code_block = False
 
         for i, line in enumerate(lines):
-            # Check for code block markers
-            if line.strip().startswith("```"):
+            stripped_line = line.strip()
+
+            # Check for code block markers (both markdown ``` and HTML <pre>)
+            is_md_fence = stripped_line.startswith("```")
+            is_html_pre_open = "<pre>" in stripped_line or "<pre><code" in stripped_line
+            is_html_pre_close = "</pre>" in stripped_line
+
+            if is_md_fence or (is_html_pre_open and not in_code_block):
                 if not in_code_block:
                     # Start of code block
                     if current_section["content"].strip():
@@ -230,8 +249,20 @@ class ResponseFormatter:
                         "content": line + "\n",
                         "start_line": i,
                     }
+                    # Single-line HTML code block: <pre><code>...</code></pre>
+                    if is_html_pre_open and is_html_pre_close:
+                        sections.append(current_section)
+                        in_code_block = False
+                        current_section = {
+                            "type": "text",
+                            "content": "",
+                            "start_line": i + 1,
+                        }
+                    # Single-line markdown fence close (```)
+                    elif is_md_fence and not is_html_pre_open:
+                        pass  # wait for closing ```
                 else:
-                    # End of code block
+                    # End of code block (closing ``` or </pre>)
                     current_section["content"] += line + "\n"
                     sections.append(current_section)
                     in_code_block = False
@@ -240,6 +271,16 @@ class ResponseFormatter:
                         "content": "",
                         "start_line": i + 1,
                     }
+            elif is_html_pre_close and in_code_block:
+                # Closing </pre> on its own line
+                current_section["content"] += line + "\n"
+                sections.append(current_section)
+                in_code_block = False
+                current_section = {
+                    "type": "text",
+                    "content": "",
+                    "start_line": i + 1,
+                }
             elif in_code_block:
                 current_section["content"] += line + "\n"
             else:
@@ -443,10 +484,50 @@ class ResponseFormatter:
         # Remove excessive whitespace
         text = re.sub(r"\n{3,}", "\n\n", text)
 
+        # Detect raw structured data (JSON/data not in code fences) and wrap
+        # in <pre><code> to prevent markdown conversion from corrupting it
+        if self._is_raw_data(text.strip()):
+            return f"<pre><code>{escape_html(text.strip())}</code></pre>"
+
         # Convert markdown to Telegram HTML
         text = markdown_to_telegram_html(text)
 
         return text.strip()
+
+    def _is_raw_data(self, text: str) -> bool:
+        """Detect raw JSON/data output that shouldn't go through markdown conversion.
+
+        Catches JSON arrays, objects, and NDJSON (newline-delimited JSON)
+        that Claude returns from tool calls without wrapping in code fences.
+        """
+        import json
+
+        stripped = text.strip()
+        if not stripped:
+            return False
+
+        # Raw JSON array or object
+        if (stripped.startswith("[") and stripped.endswith("]")) or (
+            stripped.startswith("{") and stripped.endswith("}")
+        ):
+            try:
+                json.loads(stripped)
+                return True
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # NDJSON: multiple JSON lines
+        lines = [ln for ln in stripped.split("\n") if ln.strip()]
+        if len(lines) >= 2 and all(
+            ln.strip().startswith(("{", "[")) for ln in lines[:3]
+        ):
+            try:
+                json.loads(lines[0].strip())
+                return True
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        return False
 
     def _format_code_blocks(self, text: str) -> str:
         """Ensure code blocks are properly formatted for Telegram.

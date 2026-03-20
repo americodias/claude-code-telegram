@@ -58,10 +58,43 @@ def markdown_to_telegram_html(text: str) -> str:
         return _make_placeholder(html)
 
     text = re.sub(
-        r"```(\w+)?\n(.*?)```",
+        r"```(\w+)?\n?(.*?)```",
         _replace_fenced,
         text,
         flags=re.DOTALL,
+    )
+
+    # --- 1b. Extract markdown tables ---
+    def _replace_table(m: re.Match) -> str:  # type: ignore[type-arg]
+        lines = m.group(0).strip().split("\n")
+        rows = []
+        for line in lines:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            # Skip separator rows like |---|---|
+            if cells and not all(re.match(r"^[-:]+$", c) for c in cells):
+                rows.append(cells)
+        if not rows:
+            return m.group(0)
+        col_count = max(len(r) for r in rows)
+        widths = [0] * col_count
+        for row in rows:
+            for i, cell in enumerate(row):
+                if i < col_count:
+                    widths[i] = max(widths[i], len(cell))
+        formatted = []
+        for row in rows:
+            parts = []
+            for i in range(col_count):
+                cell = row[i] if i < len(row) else ""
+                parts.append(cell.ljust(widths[i]))
+            formatted.append("  ".join(parts))
+        return _make_placeholder("<pre>" + escape_html("\n".join(formatted)) + "</pre>")
+
+    text = re.sub(
+        r"(?:^\|.+\|$\n?){2,}",
+        _replace_table,
+        text,
+        flags=re.MULTILINE,
     )
 
     # --- 2. Extract inline code ---
@@ -96,6 +129,12 @@ def markdown_to_telegram_html(text: str) -> str:
 
     # --- 8. Strikethrough: ~~text~~ ---
     text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+
+    # --- 8b. Bullet lists: - item or * item ---
+    text = re.sub(r"^[-*] (.+)$", lambda m: "• " + m.group(1), text, flags=re.MULTILINE)
+
+    # --- 8c. Blockquotes: > text ---
+    text = re.sub(r"^&gt; (.+)$", lambda m: "▎ " + m.group(1), text, flags=re.MULTILINE)
 
     # --- 9. Restore placeholders ---
     for key, html_content in placeholders:

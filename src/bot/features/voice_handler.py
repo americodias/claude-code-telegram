@@ -155,7 +155,10 @@ class VoiceHandler:
             prompt += (
                 "\n\nIMPORTANT: Your reply will be converted to speech. "
                 "Respond in European Portuguese (pt-PT) — concise, conversational, "
-                "no markdown, no code blocks, no bullet points."
+                "no markdown, no code blocks, no bullet points. "
+                "Be direct: answer first, then brief context only if needed. "
+                "Prefer ONE question per reply — save follow-ups for the next message. "
+                "Two or three questions are OK if tightly related, but never bombard."
             )
 
         return ProcessedVoice(

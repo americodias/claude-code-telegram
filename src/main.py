@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import signal
 import sys
@@ -273,6 +274,22 @@ async def run_application(app: Dict[str, Any]) -> None:
                     failed=sync_result.failed,
                     deactivated=sync_result.deactivated,
                 )
+
+        # Check reboot flag file for self-reboot awareness
+        reboot_flag_path = config.reboot_flag_path
+        if reboot_flag_path.exists():
+            try:
+                reboot_data = json.loads(reboot_flag_path.read_text())
+                from datetime import datetime, timezone
+                reboot_time = datetime.fromisoformat(reboot_data["timestamp"])
+                age = (datetime.now(timezone.utc) - reboot_time).total_seconds()
+                if age < 300:  # < 5 min
+                    bot.deps["reboot_info"] = reboot_data
+                    logger.info("Recent reboot detected", age_seconds=int(age), reason=reboot_data.get("reason"))
+                # Clear the flag file after reading
+                reboot_flag_path.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning("Failed to read reboot flag", error=str(e))
 
         # Now wire up components that need the Telegram Bot instance
         telegram_bot = bot.app.bot

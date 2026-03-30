@@ -590,6 +590,4 @@ class Settings(BaseSettings):
         path_or_name = self.whisper_cpp_model_path or "base"
         if "/" in path_or_name or path_or_name.endswith(".bin"):
             return path_or_name
-        return str(
-            Path.home() / ".cache" / "whisper-cpp" / f"ggml-{path_or_name}.bin"
-        )
+        return str(Path.home() / ".cache" / "whisper-cpp" / f"ggml-{path_or_name}.bin")

@@ -86,6 +86,32 @@ class ClaudeIntegration:
                     continue_session=should_continue,
                     stream_callback=on_stream,
                 )
+
+                # Detect API errors returned as response content (not exceptions).
+                # This happens when session history is corrupted (e.g. invalid
+                # base64 image data from a previous Read of an image file).
+                if (
+                    should_continue
+                    and response.content
+                    and response.content.startswith("API Error:")
+                ):
+                    logger.warning(
+                        "Session resume returned API error, starting fresh session",
+                        failed_session_id=claude_session_id,
+                        api_error=response.content[:200],
+                    )
+                    await self.session_manager.remove_session(session.session_id)
+                    session = await self.session_manager.get_or_create_session(
+                        user_id, working_directory
+                    )
+                    response = await self._execute(
+                        prompt=prompt,
+                        working_directory=working_directory,
+                        session_id=None,
+                        continue_session=False,
+                        stream_callback=on_stream,
+                    )
+
             except Exception as resume_error:
                 # If resume failed (e.g., session expired/missing on Claude's side),
                 # retry as a fresh session.  The CLI returns a generic exit-code-1

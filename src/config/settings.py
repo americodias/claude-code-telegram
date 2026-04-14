@@ -41,6 +41,14 @@ class Settings(BaseSettings):
 
     # Security
     approved_directory: Path = Field(..., description="Base directory for projects")
+    image_attachments_dir: Optional[str] = Field(
+        None,
+        description=(
+            "Directory to copy images into for external visibility "
+            "(e.g. Obsidian attachments). Relative to approved_directory. "
+            "Disabled when unset."
+        ),
+    )
     allowed_users: Optional[List[int]] = Field(
         None, description="Allowed Telegram user IDs"
     )

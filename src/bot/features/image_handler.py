@@ -9,6 +9,7 @@ Features:
 """
 
 import base64
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -56,6 +57,12 @@ class ImageHandler:
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / filename
         save_path.write_bytes(image_bytes)
+
+        # Copy to attachments dir for external visibility (e.g. Obsidian)
+        if self.config.image_attachments_dir:
+            att_dir = Path(self.config.approved_directory) / self.config.image_attachments_dir
+            att_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(save_path, att_dir / filename)
 
         # Relative path from vault root — how Claude navigates the vault
         relative_path = f".media.telegram/images/{filename}"

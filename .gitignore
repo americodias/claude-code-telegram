@@ -142,6 +142,9 @@ data/
 *.swo
 *~
 
+# uv lock file (managed per-machine)
+uv.lock
+
 # Bot-specific
 sessions/
 backups/

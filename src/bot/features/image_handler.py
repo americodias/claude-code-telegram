@@ -67,9 +67,15 @@ class ImageHandler:
         # Relative path from vault root — how Claude navigates the vault
         relative_path = f".media.telegram/images/{filename}"
 
-        prompt = f"The user sent an image. I've saved it to `{relative_path}`. Please read and analyze it."
+        prompt = f"The user sent an image. I've saved it to `{relative_path}`. Use the Read tool to view and analyze it."
         if caption:
             prompt += f"\n\nCaption from user: {caption}"
+        prompt += (
+            "\n\nIf you embed this image in an Obsidian note, copy it to the appropriate "
+            "`5-Attachments/` subfolder first (e.g. `5-Attachments/<topic>/` for health images, "
+            "`5-Attachments/telegram/` for general photos, `5-Attachments/<topic>/` for work) "
+            "and use that path in the Obsidian wikilink."
+        )
 
         return ProcessedImage(
             prompt=prompt,

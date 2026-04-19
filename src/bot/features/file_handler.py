@@ -8,6 +8,7 @@ Features:
 - Diff generation
 """
 
+import datetime
 import shutil
 import tarfile
 import uuid
@@ -145,6 +146,10 @@ class FileHandler:
             # Process based on type
             if file_type == "archive":
                 return await self._process_archive(file_path, context)
+            elif file_type in ("image", "pdf"):
+                return await self._process_media_file(
+                    file_path, document.file_name or "file", file_type, context
+                )
             elif file_type == "code":
                 return await self._process_code_file(file_path, context)
             elif file_type == "text":
@@ -178,6 +183,14 @@ class FileHandler:
         if ext in {".zip", ".tar", ".gz", ".bz2", ".xz", ".7z"}:
             return "archive"
 
+        # Check if image
+        if ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif", ".bmp", ".tiff", ".tif"}:
+            return "image"
+
+        # Check if PDF
+        if ext == ".pdf":
+            return "pdf"
+
         # Check if code
         if ext in self.code_extensions:
             return "code"
@@ -189,6 +202,33 @@ class FileHandler:
             return "text"
         except (UnicodeDecodeError, IOError):
             return "binary"
+
+    async def _process_media_file(
+        self, file_path: Path, original_name: str, media_type: str, context: str
+    ) -> ProcessedFile:
+        """Save image or PDF to .media.telegram/ and return a path-based prompt."""
+        subdir = "images" if media_type == "image" else "pdfs"
+        save_dir = Path(self.config.approved_directory) / ".media.telegram" / subdir
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S%f")
+        dest = save_dir / f"telegram_{timestamp}_{original_name}"
+        shutil.copy2(file_path, dest)
+
+        relative_path = f".media.telegram/{subdir}/{dest.name}"
+        prompt = (
+            f"{context}\n\n"
+            f"The file has been saved to `{relative_path}`. Use the Read tool to view and analyze it.\n\n"
+            "If you embed this file in an Obsidian note, copy it to the appropriate `5-Attachments/` "
+            "subfolder first (e.g. `5-Attachments/health/americo/analises/` for medical documents, "
+            "`5-Attachments/telegram/` for general attachments, `5-Attachments/nanopower/{project}/` "
+            "for work files) and use that path in the Obsidian wikilink."
+        )
+        return ProcessedFile(
+            type=media_type,
+            prompt=prompt,
+            metadata={"path": str(dest), "relative_path": relative_path},
+        )
 
     async def _process_archive(self, archive_path: Path, context: str) -> ProcessedFile:
         """Extract and analyze archive contents"""

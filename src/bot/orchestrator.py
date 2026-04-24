@@ -465,6 +465,11 @@ class MessageOrchestrator:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
             return commands
 
+    def rewrite_skill_command(self, text: str) -> str:
+        """Undo dash->underscore normalization for discovered skill commands."""
+        from .features.skill_discovery import rewrite_skill_command
+        return rewrite_skill_command(text, self._skills)
+
     # --- Agentic handlers ---
 
     async def agentic_start(
@@ -1021,7 +1026,7 @@ class MessageOrchestrator:
     ) -> None:
         """Direct Claude passthrough. Simple progress. No suggestions."""
         user_id = update.effective_user.id
-        message_text = update.message.text
+        message_text = self.rewrite_skill_command(update.message.text)
 
         logger.info(
             "Agentic text message",

@@ -252,6 +252,53 @@ class Settings(BaseSettings):
             "Named models resolve to ~/.cache/whisper-cpp/ggml-{name}.bin"
         ),
     )
+    media_archive_enabled: bool = Field(
+        True,
+        description=(
+            "Save uploaded Telegram media (images, documents, voice) to "
+            "media_archive_dir under approved_directory. The image bytes "
+            "are still passed to Claude via SDK content blocks; persistence "
+            "lets notes reference files via Obsidian wiki-links."
+        ),
+    )
+    media_archive_dir: str = Field(
+        ".media.telegram",
+        description=(
+            "Subdirectory under approved_directory where uploaded Telegram "
+            "media is saved. Should be gitignored."
+        ),
+    )
+    attachment_promote_enabled: bool = Field(
+        True,
+        description=(
+            "After each Claude turn, scan modified .md files for new "
+            "![[...]] references to media_archive_dir; copy referenced "
+            "files to attachment_dir/<type>/YYYY-MM/."
+        ),
+    )
+    attachment_dir: str = Field(
+        "5-Attachments",
+        description=(
+            "Subdirectory under approved_directory where Obsidian-"
+            "referenced media is promoted from the archive."
+        ),
+    )
+    media_group_window_seconds: float = Field(
+        2.5,
+        description=(
+            "Debounce window for Telegram media-group uploads. Multiple "
+            "files arriving with the same media_group_id are buffered "
+            "and dispatched in a single Claude run."
+        ),
+        ge=0.1,
+        le=30.0,
+    )
+    media_group_max_files: int = Field(
+        20,
+        description="Safety cap on files per media-group batch.",
+        ge=1,
+        le=100,
+    )
     tts_enabled: bool = Field(
         True,
         description="Send voice reply after voice messages",

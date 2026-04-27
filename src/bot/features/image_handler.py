@@ -26,6 +26,7 @@ class ProcessedImage:
     base64_data: str
     size: int
     metadata: Dict[str, any] = None
+    raw_bytes: Optional[bytes] = None
 
 
 class ImageHandler:
@@ -68,6 +69,7 @@ class ImageHandler:
                 "format": self._detect_format(image_bytes),
                 "has_caption": caption is not None,
             },
+            raw_bytes=bytes(image_bytes),
         )
 
     def _detect_image_type(self, image_bytes: bytes) -> str:

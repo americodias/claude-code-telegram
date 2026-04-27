@@ -32,6 +32,12 @@ from telegram.ext import (
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
+from .features.attachment_promoter import (
+    collect_modified_md_paths,
+    promote_referenced_media,
+)
+from .features.media_archive import MediaArchive
+from .features.media_group_buffer import BufferedFile, MediaGroupBuffer
 from .features.skill_discovery import (
     DiscoveredSkill,
     discover_skills,
@@ -143,6 +149,14 @@ class MessageOrchestrator:
         self._skills: Dict[str, DiscoveredSkill] = discover_skills(
             settings.approved_directory
         )
+        self._media_archive = (
+            MediaArchive(settings) if settings.media_archive_enabled else None
+        )
+        self._media_group_buffer = MediaGroupBuffer(
+            window_seconds=settings.media_group_window_seconds,
+            max_files=settings.media_group_max_files,
+            on_flush=self._flush_media_group,
+        )
 
     def _refresh_skills(self) -> None:
         """Re-scan skill directories. Called from /new so newly-added skills
@@ -152,6 +166,124 @@ class MessageOrchestrator:
     def rewrite_skill_command(self, text: str) -> str:
         """Undo dash->underscore normalization for discovered skill commands."""
         return rewrite_skill_command(text, self._skills)
+
+    def _archive_image(
+        self,
+        raw_bytes: Optional[bytes],
+        chat_id: int,
+        message_id: int,
+        ext: str,
+    ) -> Optional[Path]:
+        """Persist incoming image bytes into the media archive (if enabled)."""
+        if self._media_archive is None or not raw_bytes:
+            return None
+        try:
+            return self._media_archive.save_image(
+                raw_bytes, chat_id=chat_id, message_id=message_id, ext=ext
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to archive image",
+                error=str(e),
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            return None
+
+    def _archive_relative(self, path: Optional[Path]) -> str:
+        """Render an archive path relative to approved_directory for prompts.
+
+        Returns the original string-encoded path if the file lives outside
+        the vault root (shouldn't happen, but defensive).
+        """
+        if path is None:
+            return ""
+        try:
+            return str(
+                Path(path).resolve().relative_to(
+                    Path(self.settings.approved_directory).resolve()
+                )
+            )
+        except ValueError:
+            return str(path)
+
+    def _build_media_prompt(
+        self,
+        base_prompt: str,
+        saved_paths: List[Path],
+        caption: Optional[str],
+    ) -> str:
+        """Append archive-path hints to a media prompt so Claude knows
+        where the uploaded files live on disk.
+        """
+        rels = [self._archive_relative(p) for p in saved_paths if p is not None]
+        if not rels:
+            return base_prompt
+        if len(rels) == 1:
+            hint = f"\n\n[File saved at: `{rels[0]}`]"
+        else:
+            paths_md = "\n".join(f"- `{r}`" for r in rels)
+            hint = f"\n\n[Files saved at:\n{paths_md}]"
+        return (base_prompt or "").rstrip() + hint
+
+    async def _flush_media_group(
+        self,
+        first_update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        files: List[BufferedFile],
+        progress_msg: Any,
+    ) -> None:
+        """Buffer flush callback — dispatch one Claude run for N buffered files.
+
+        Loads each archived file, builds image content blocks for images,
+        composes a single prompt listing every saved path, and forwards
+        through the unified media-message handler.
+        """
+        approved = Path(self.settings.approved_directory)
+        captions = [f.caption for f in files if f.caption]
+        joined_caption = (
+            " | ".join(c.strip() for c in captions if c.strip()) if captions else None
+        )
+
+        images: List[Dict[str, str]] = []
+        saved_paths: List[Path] = []
+        for f in files:
+            if not f.relative_path:
+                continue
+            abs_path = approved / f.relative_path
+            saved_paths.append(abs_path)
+            if f.file_type == "image" and abs_path.exists():
+                ext = abs_path.suffix.lstrip(".").lower() or "png"
+                media_type = _MEDIA_TYPE_MAP.get(ext, "image/png")
+                try:
+                    import base64
+                    data = base64.b64encode(abs_path.read_bytes()).decode("utf-8")
+                    images.append({"data": data, "media_type": media_type})
+                except Exception as e:
+                    logger.warning(
+                        "Failed to load buffered image bytes for SDK",
+                        path=str(abs_path),
+                        error=str(e),
+                    )
+
+        prompt = self._build_media_prompt(
+            f"{len(files)} file(s) attached.", saved_paths, joined_caption
+        )
+        if joined_caption:
+            prompt = f"{joined_caption}\n\n{prompt}"
+
+        chat = first_update.message.chat
+        user_id = first_update.effective_user.id
+
+        await self._handle_agentic_media_message(
+            update=first_update,
+            context=context,
+            prompt=prompt,
+            progress_msg=progress_msg,
+            user_id=user_id,
+            chat=chat,
+            images=images or None,
+        )
 
     def _inject_deps(self, handler: Callable) -> Callable:  # type: ignore[type-arg]
         """Wrap handler to inject dependencies into context.bot_data."""
@@ -1103,6 +1235,19 @@ class MessageOrchestrator:
                 claude_response, context, self.settings, user_id
             )
 
+            # Promote any newly-referenced archived media into 5-Attachments/.
+            if self.settings.attachment_promote_enabled:
+                try:
+                    modified_md = collect_modified_md_paths(tool_log)
+                    if modified_md:
+                        promote_referenced_media(self.settings, modified_md)
+                except Exception as e:
+                    logger.warning(
+                        "Attachment promotion failed",
+                        error=str(e),
+                        user_id=user_id,
+                    )
+
             # Store interaction
             storage = context.bot_data.get("storage")
             if storage:
@@ -1236,7 +1381,12 @@ class MessageOrchestrator:
     async def agentic_document(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Process file upload -> Claude, minimal chrome."""
+        """Process file upload -> Claude, minimal chrome.
+
+        For media-group uploads, the document is buffered via
+        MediaGroupBuffer and dispatched in a single Claude run alongside
+        its peers. Single uploads dispatch immediately.
+        """
         user_id = update.effective_user.id
         document = update.message.document
 
@@ -1264,6 +1414,42 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
+
+        # Persist into the media archive up front so it survives across
+        # both the media-group buffer path and the inline path.
+        saved_path: Optional[Path] = None
+        if self._media_archive is not None:
+            try:
+                tg_file = await document.get_file()
+                file_bytes = bytes(await tg_file.download_as_bytearray())
+                kind = "pdfs" if (document.mime_type == "application/pdf" or
+                                   (document.file_name or "").lower().endswith(".pdf")) \
+                    else "documents"
+                saved_path = self._media_archive.save_document(
+                    file_bytes,
+                    chat_id=update.message.chat_id,
+                    message_id=update.message.message_id,
+                    original_filename=document.file_name or "file",
+                    kind=kind,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to archive document",
+                    error=str(e),
+                    user_id=user_id,
+                    filename=document.file_name,
+                )
+
+        if update.message.media_group_id:
+            buffered = BufferedFile(
+                relative_path=self._archive_relative(saved_path) if saved_path else "",
+                file_type="document",
+                caption=update.message.caption,
+                message_id=update.message.message_id,
+            )
+            await self._media_group_buffer.add(update, context, buffered)
+            return
+
         progress_msg = await update.message.reply_text("Working...")
 
         # Try enhanced file handler, fall back to basic
@@ -1299,6 +1485,13 @@ class MessageOrchestrator:
                     "Unsupported file format. Must be text-based (UTF-8)."
                 )
                 return
+
+        # Tell Claude where the file lives in the archive so it can
+        # reference it via Obsidian-style ![[...]] links if relevant.
+        if saved_path is not None:
+            prompt = self._build_media_prompt(
+                prompt, [saved_path], update.message.caption
+            )
 
         # Process with Claude
         claude_integration = context.bot_data.get("claude_integration")
@@ -1350,6 +1543,19 @@ class MessageOrchestrator:
             _update_working_directory_from_claude_response(
                 claude_response, context, self.settings, user_id
             )
+
+            # Promote any newly-referenced archived media into 5-Attachments/.
+            if self.settings.attachment_promote_enabled:
+                try:
+                    modified_md = collect_modified_md_paths(tool_log)
+                    if modified_md:
+                        promote_referenced_media(self.settings, modified_md)
+                except Exception as e:
+                    logger.warning(
+                        "Attachment promotion failed",
+                        error=str(e),
+                        user_id=user_id,
+                    )
 
             from .utils.formatting import ResponseFormatter
 
@@ -1415,7 +1621,12 @@ class MessageOrchestrator:
     async def agentic_photo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Process photo -> Claude, minimal chrome."""
+        """Process photo -> Claude, minimal chrome.
+
+        For media-group uploads (multiple photos sent together), the photo
+        is buffered via MediaGroupBuffer and dispatched in a single Claude
+        run alongside its peers. Single uploads dispatch immediately.
+        """
         user_id = update.effective_user.id
 
         features = context.bot_data.get("features")
@@ -1427,7 +1638,6 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
 
         try:
             photo = update.message.photo[-1]
@@ -1435,6 +1645,28 @@ class MessageOrchestrator:
                 photo, update.message.caption
             )
             fmt = processed_image.metadata.get("format", "png")
+
+            saved_path = self._archive_image(
+                processed_image.raw_bytes,
+                update.message.chat_id,
+                update.message.message_id,
+                fmt,
+            )
+
+            if update.message.media_group_id:
+                buffered = BufferedFile(
+                    relative_path=self._archive_relative(saved_path),
+                    file_type="image",
+                    caption=update.message.caption,
+                    message_id=update.message.message_id,
+                )
+                await self._media_group_buffer.add(update, context, buffered)
+                return
+
+            progress_msg = await update.message.reply_text("Working...")
+            prompt = self._build_media_prompt(
+                processed_image.prompt, [saved_path], update.message.caption
+            )
             images = [
                 {
                     "data": processed_image.base64_data,
@@ -1445,7 +1677,7 @@ class MessageOrchestrator:
             await self._handle_agentic_media_message(
                 update=update,
                 context=context,
-                prompt=processed_image.prompt,
+                prompt=prompt,
                 progress_msg=progress_msg,
                 user_id=user_id,
                 chat=chat,
@@ -1455,7 +1687,12 @@ class MessageOrchestrator:
         except Exception as e:
             from .handlers.message import _format_error_message
 
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
+            try:
+                await update.message.reply_text(
+                    _format_error_message(e), parse_mode="HTML"
+                )
+            except Exception:
+                pass
             logger.error(
                 "Claude photo processing failed", error=str(e), user_id=user_id
             )
@@ -1480,7 +1717,9 @@ class MessageOrchestrator:
         try:
             voice = update.message.voice
             processed_voice = await voice_handler.process_voice_message(
-                voice, update.message.caption
+                voice,
+                update.message.caption,
+                media_archive=self._media_archive,
             )
 
             await progress_msg.edit_text("Working...")
@@ -1492,6 +1731,7 @@ class MessageOrchestrator:
                 user_id=user_id,
                 chat=chat,
                 is_voice_message=True,
+                voice_pair_dir=processed_voice.pair_dir,
             )
 
         except Exception as e:
@@ -1513,6 +1753,7 @@ class MessageOrchestrator:
         chat: Any,
         images: Optional[List[Dict[str, str]]] = None,
         is_voice_message: bool = False,
+        voice_pair_dir: Optional[str] = None,
     ) -> None:
         """Run a media-derived prompt through Claude and send responses."""
         claude_integration = context.bot_data.get("claude_integration")
@@ -1565,6 +1806,21 @@ class MessageOrchestrator:
             claude_response, context, self.settings, user_id
         )
 
+        # Promote any newly-referenced archived media into 5-Attachments/.
+        # Only the .md files Claude touched this turn are scanned, so the
+        # cost stays bounded.
+        if self.settings.attachment_promote_enabled:
+            try:
+                modified_md = collect_modified_md_paths(tool_log)
+                if modified_md:
+                    promote_referenced_media(self.settings, modified_md)
+            except Exception as e:
+                logger.warning(
+                    "Attachment promotion failed",
+                    error=str(e),
+                    user_id=user_id,
+                )
+
         from .utils.formatting import ResponseFormatter
 
         formatter = ResponseFormatter(self.settings)
@@ -1599,7 +1855,9 @@ class MessageOrchestrator:
                     )
                     if full_text.strip():
                         await chat.send_action("record_voice")
-                        tts_result = await tts_handler.synthesise(full_text)
+                        tts_result = await tts_handler.synthesise(
+                            full_text, pair_dir=voice_pair_dir
+                        )
                         with open(tts_result.audio_path, "rb") as audio_file:
                             await update.message.reply_voice(
                                 voice=audio_file,

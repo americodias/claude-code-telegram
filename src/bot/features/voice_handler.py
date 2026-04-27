@@ -23,6 +23,7 @@ class ProcessedVoice:
     prompt: str
     transcription: str
     duration: int
+    pair_dir: Optional[str] = None  # Path string of paired-audio directory
 
 
 class VoiceHandler:
@@ -51,7 +52,10 @@ class VoiceHandler:
             )
 
     async def process_voice_message(
-        self, voice: Voice, caption: Optional[str] = None
+        self,
+        voice: Voice,
+        caption: Optional[str] = None,
+        media_archive: Optional[Any] = None,
     ) -> ProcessedVoice:
         """Download and transcribe a voice message.
 
@@ -107,10 +111,27 @@ class VoiceHandler:
         dur = voice.duration
         duration_secs = int(dur.total_seconds()) if isinstance(dur, timedelta) else dur
 
+        # Persist received audio + transcript when a media_archive is supplied,
+        # so the TTS reply can write its sent.* peer into the same dir.
+        pair_dir_str: Optional[str] = None
+        if media_archive is not None:
+            try:
+                pair_dir = media_archive.make_audio_pair_dir()
+                media_archive.save_received_audio(
+                    voice_bytes,
+                    pair_dir=pair_dir,
+                    ext="ogg",
+                    transcript=transcription,
+                )
+                pair_dir_str = str(pair_dir)
+            except Exception as e:
+                logger.warning("Failed to archive received voice", error=str(e))
+
         return ProcessedVoice(
             prompt=prompt,
             transcription=transcription,
             duration=duration_secs,
+            pair_dir=pair_dir_str,
         )
 
     # -- Mistral provider --

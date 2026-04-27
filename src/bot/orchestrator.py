@@ -1469,22 +1469,40 @@ class MessageOrchestrator:
                 file_handler = None
 
         if not file_handler:
-            file = await document.get_file()
-            file_bytes = await file.download_as_bytearray()
-            try:
-                content = file_bytes.decode("utf-8")
+            caption = update.message.caption or "Please review this file:"
+            content: Optional[str] = None
+            if saved_path is None:
+                # No archive copy to fall back on — try inline UTF-8 decode.
+                file = await document.get_file()
+                file_bytes = await file.download_as_bytearray()
+                try:
+                    content = file_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    await progress_msg.edit_text(
+                        "Unsupported file format. Must be text-based (UTF-8)."
+                    )
+                    return
+            else:
+                # Archive copy exists — try UTF-8 from it; if binary, hand
+                # Claude the path and let it use Read instead.
+                try:
+                    content = saved_path.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    content = None
+
+            if content is not None:
                 if len(content) > 50000:
                     content = content[:50000] + "\n... (truncated)"
-                caption = update.message.caption or "Please review this file:"
                 prompt = (
                     f"{caption}\n\n**File:** `{document.file_name}`\n\n"
                     f"```\n{content}\n```"
                 )
-            except UnicodeDecodeError:
-                await progress_msg.edit_text(
-                    "Unsupported file format. Must be text-based (UTF-8)."
+            else:
+                # Binary file — Claude reads from the archive path via Read tool.
+                prompt = (
+                    f"{caption}\n\n**File:** `{document.file_name}` "
+                    "(binary; use the Read tool on the saved path below)."
                 )
-                return
 
         # Tell Claude where the file lives in the archive so it can
         # reference it via Obsidian-style ![[...]] links if relevant.

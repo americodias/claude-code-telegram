@@ -258,6 +258,29 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Telegram media-group batching: when the user sends multiple files at once,
+    # Telegram delivers each as a separate Update sharing media_group_id. We
+    # debounce items in the same group, then run Claude once over all of them.
+    media_group_window_seconds: float = Field(
+        2.5,
+        description=(
+            "Debounce window for Telegram media groups. The window resets each "
+            "time a new item in the same group arrives; the buffer flushes when "
+            "the window elapses with no new arrivals."
+        ),
+        ge=0.5,
+        le=30.0,
+    )
+    media_group_max_files: int = Field(
+        10,
+        description=(
+            "Hard cap on items per buffered media group; force-flushes early "
+            "if exceeded. Telegram itself caps a media group at 10."
+        ),
+        ge=2,
+        le=50,
+    )
+
     # Output verbosity (0=quiet, 1=normal, 2=detailed)
     verbose_level: int = Field(
         1,

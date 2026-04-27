@@ -19,6 +19,14 @@ from telegram import PhotoSize
 
 from src.config import Settings
 
+# Shared prompt fragments — also used by media_group_buffer for multi-file batches
+ATTACHMENTS_GUIDANCE = (
+    "If you embed this image in an Obsidian note, copy it to the appropriate "
+    "`5-Attachments/` subfolder first (e.g. `5-Attachments/<topic>/` for health images, "
+    "`5-Attachments/telegram/` for general photos, `5-Attachments/<topic>/` for work) "
+    "and use that path in the Obsidian wikilink."
+)
+
 
 @dataclass
 class ProcessedImage:
@@ -70,12 +78,7 @@ class ImageHandler:
         prompt = f"The user sent an image. I've saved it to `{relative_path}`. Use the Read tool to view and analyze it."
         if caption:
             prompt += f"\n\nCaption from user: {caption}"
-        prompt += (
-            "\n\nIf you embed this image in an Obsidian note, copy it to the appropriate "
-            "`5-Attachments/` subfolder first (e.g. `5-Attachments/<topic>/` for health images, "
-            "`5-Attachments/telegram/` for general photos, `5-Attachments/<topic>/` for work) "
-            "and use that path in the Obsidian wikilink."
-        )
+        prompt += "\n\n" + ATTACHMENTS_GUIDANCE
 
         return ProcessedImage(
             prompt=prompt,
@@ -86,6 +89,7 @@ class ImageHandler:
                 "format": image_format,
                 "has_caption": caption is not None,
                 "path": str(save_path),
+                "relative_path": relative_path,
             },
         )
 

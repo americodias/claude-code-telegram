@@ -119,6 +119,16 @@ class MessageOrchestrator:
         from .features.skill_discovery import discover_skills
         self._skills = discover_skills(settings.approved_directory)
 
+        # Media-group buffer: debounces multi-file Telegram messages so a
+        # single Claude session sees all files at once.
+        from .features.media_group_buffer import MediaGroupBuffer
+
+        self._media_group_buffer = MediaGroupBuffer(
+            window_seconds=settings.media_group_window_seconds,
+            max_files=settings.media_group_max_files,
+            on_flush=self._flush_media_group,
+        )
+
     def _inject_deps(self, handler: Callable) -> Callable:  # type: ignore[type-arg]
         """Wrap handler to inject dependencies into context.bot_data."""
 
@@ -924,6 +934,71 @@ class MessageOrchestrator:
 
         return caption_sent
 
+    async def _send_claude_reply(
+        self,
+        update: Update,
+        progress_msg: Any,
+        claude_response: Any,
+        mcp_images: List[ImageAttachment],
+        reply_to_message_id: int,
+    ) -> None:
+        """Format Claude's response, delete the progress msg, and post the reply.
+
+        Shared by agentic_photo, agentic_document, and the media-group buffer
+        flush. The first formatted text message is sent as a reply to
+        *reply_to_message_id*; later messages and any MCP-collected images are
+        posted as standalone messages in the chat.
+        """
+        from .utils.formatting import ResponseFormatter
+
+        formatter = ResponseFormatter(self.settings)
+        formatted_messages = formatter.format_claude_response(
+            claude_response.content
+        )
+
+        try:
+            await progress_msg.delete()
+        except Exception:
+            logger.debug("Failed to delete progress message, ignoring")
+
+        images: List[ImageAttachment] = mcp_images
+
+        caption_sent = False
+        if images and len(formatted_messages) == 1:
+            msg = formatted_messages[0]
+            if msg.text and len(msg.text) <= 1024:
+                try:
+                    caption_sent = await self._send_images(
+                        update,
+                        images,
+                        reply_to_message_id=reply_to_message_id,
+                        caption=msg.text,
+                        caption_parse_mode=msg.parse_mode,
+                    )
+                except Exception as img_err:
+                    logger.warning("Image+caption send failed", error=str(img_err))
+
+        if not caption_sent:
+            for i, message in enumerate(formatted_messages):
+                await update.message.reply_text(
+                    message.text,
+                    parse_mode=message.parse_mode,
+                    reply_markup=None,
+                    reply_to_message_id=(reply_to_message_id if i == 0 else None),
+                )
+                if i < len(formatted_messages) - 1:
+                    await asyncio.sleep(0.5)
+
+            if images:
+                try:
+                    await self._send_images(
+                        update,
+                        images,
+                        reply_to_message_id=reply_to_message_id,
+                    )
+                except Exception as img_err:
+                    logger.warning("Image send failed", error=str(img_err))
+
     async def _run_claude_and_reply(
         self,
         update: Update,
@@ -1018,6 +1093,189 @@ class MessageOrchestrator:
                 )
             except Exception:
                 pass
+        finally:
+            heartbeat.cancel()
+
+    async def _enqueue_photo_for_media_group(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        image_handler: Any,
+    ) -> None:
+        """Download a photo and append it to its media-group buffer entry."""
+        from .features.media_group_buffer import BufferedFile
+
+        try:
+            photo = update.message.photo[-1]
+            processed_image = await image_handler.process_image(
+                photo, update.message.caption
+            )
+        except Exception:
+            logger.exception(
+                "Failed to download photo for media group; falling back to per-file path",
+                user_id=update.effective_user.id,
+                media_group_id=update.message.media_group_id,
+            )
+            await update.message.reply_text(
+                "Sorry, I couldn't save one of those photos."
+            )
+            return
+
+        relative_path = processed_image.metadata.get("relative_path")
+        if not relative_path:
+            relative_path = processed_image.metadata.get("path", "")
+
+        await self._media_group_buffer.add(
+            update,
+            context,
+            BufferedFile(
+                relative_path=str(relative_path),
+                file_type="image",
+                caption=update.message.caption,
+                message_id=update.message.message_id,
+            ),
+        )
+
+    async def _enqueue_document_for_media_group(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        file_handler: Any,
+    ) -> None:
+        """Download a document and append it to its media-group buffer entry."""
+        from .features.media_group_buffer import BufferedFile
+
+        document = update.message.document
+        try:
+            processed_file = await file_handler.handle_document_upload(
+                document,
+                update.effective_user.id,
+                update.message.caption or "",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to save document for media group",
+                user_id=update.effective_user.id,
+                filename=getattr(document, "file_name", "?"),
+                media_group_id=update.message.media_group_id,
+            )
+            await update.message.reply_text(
+                "Sorry, I couldn't save one of those files."
+            )
+            return
+
+        relative_path = processed_file.metadata.get("relative_path")
+        if not relative_path:
+            relative_path = processed_file.metadata.get("path", "")
+
+        await self._media_group_buffer.add(
+            update,
+            context,
+            BufferedFile(
+                relative_path=str(relative_path),
+                file_type=getattr(processed_file, "type", "document"),
+                caption=update.message.caption,
+                message_id=update.message.message_id,
+            ),
+        )
+
+    async def _flush_media_group(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        files: List[Any],  # List[BufferedFile]; Any to avoid heavy import
+        progress_msg: Any,
+    ) -> None:
+        """Run Claude once over all buffered files in a media group."""
+        from .features.image_handler import ATTACHMENTS_GUIDANCE
+
+        user_id = update.effective_user.id
+        chat = update.message.chat
+
+        # Telegram puts the caption on exactly one item; pick the first non-empty.
+        caption = next((f.caption for f in files if f.caption), None)
+
+        path_lines = "\n".join(f"- {f.relative_path}" for f in files)
+        prompt = (
+            f"The user sent {len(files)} files. They are saved at:\n"
+            f"{path_lines}\n\n"
+            "Use the Read tool to view and analyze each."
+        )
+        if caption:
+            prompt += f"\n\nCaption from user: {caption}"
+        prompt += f"\n\n{ATTACHMENTS_GUIDANCE}"
+
+        claude_integration = context.bot_data.get("claude_integration")
+        if not claude_integration:
+            try:
+                await progress_msg.edit_text(
+                    "Claude integration not available. Check configuration."
+                )
+            except Exception:
+                pass
+            return
+
+        current_dir = context.user_data.get(
+            "current_directory", self.settings.approved_directory
+        )
+        session_id = context.user_data.get("claude_session_id")
+        force_new = bool(context.user_data.get("force_new_session"))
+
+        verbose_level = self._get_verbose_level(context)
+        tool_log: List[Dict[str, Any]] = []
+        mcp_images_group: List[ImageAttachment] = []
+        on_stream = self._make_stream_callback(
+            verbose_level,
+            progress_msg,
+            tool_log,
+            time.time(),
+            mcp_images=mcp_images_group,
+            approved_directory=self.settings.approved_directory,
+        )
+
+        heartbeat = self._start_typing_heartbeat(chat)
+        try:
+            claude_response = await claude_integration.run_command(
+                prompt=prompt,
+                working_directory=current_dir,
+                user_id=user_id,
+                session_id=session_id,
+                on_stream=on_stream,
+                force_new=force_new,
+            )
+
+            if force_new:
+                context.user_data["force_new_session"] = False
+            context.user_data["claude_session_id"] = claude_response.session_id
+
+            from .handlers.message import _update_working_directory_from_claude_response
+
+            _update_working_directory_from_claude_response(
+                claude_response, context, self.settings, user_id
+            )
+
+            await self._send_claude_reply(
+                update,
+                progress_msg,
+                claude_response,
+                mcp_images_group,
+                reply_to_message_id=update.message.message_id,
+            )
+        except Exception as e:
+            from .handlers.message import _format_error_message
+
+            try:
+                await progress_msg.edit_text(
+                    _format_error_message(e), parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            logger.error(
+                "Claude media-group processing failed",
+                error=str(e),
+                user_id=user_id,
+                file_count=len(files),
+            )
         finally:
             heartbeat.cancel()
 
@@ -1279,12 +1537,24 @@ class MessageOrchestrator:
             )
             return
 
+        # Multi-file path: Telegram media-group items each arrive as separate
+        # Updates sharing media_group_id. Buffer them, run Claude once.
+        features = context.bot_data.get("features")
+        if update.message.media_group_id is not None:
+            file_handler = features.get_file_handler() if features else None
+            if file_handler is not None:
+                await self._enqueue_document_for_media_group(
+                    update, context, file_handler
+                )
+                return
+            # No file_handler available — fall through to single-file path so
+            # the user gets an error rather than silent drop.
+
         chat = update.message.chat
         await chat.send_action("typing")
         progress_msg = await update.message.reply_text("Working...")
 
         # Try enhanced file handler, fall back to basic
-        features = context.bot_data.get("features")
         file_handler = features.get_file_handler() if features else None
         prompt: Optional[str] = None
 
@@ -1368,58 +1638,13 @@ class MessageOrchestrator:
                 claude_response, context, self.settings, user_id
             )
 
-            from .utils.formatting import ResponseFormatter
-
-            formatter = ResponseFormatter(self.settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content
+            await self._send_claude_reply(
+                update,
+                progress_msg,
+                claude_response,
+                mcp_images_doc,
+                reply_to_message_id=update.message.message_id,
             )
-
-            try:
-                await progress_msg.delete()
-            except Exception:
-                logger.debug("Failed to delete progress message, ignoring")
-
-            # Use MCP-collected images (from send_image_to_user tool calls)
-            images: List[ImageAttachment] = mcp_images_doc
-
-            caption_sent = False
-            if images and len(formatted_messages) == 1:
-                msg = formatted_messages[0]
-                if msg.text and len(msg.text) <= 1024:
-                    try:
-                        caption_sent = await self._send_images(
-                            update,
-                            images,
-                            reply_to_message_id=update.message.message_id,
-                            caption=msg.text,
-                            caption_parse_mode=msg.parse_mode,
-                        )
-                    except Exception as img_err:
-                        logger.warning("Image+caption send failed", error=str(img_err))
-
-            if not caption_sent:
-                for i, message in enumerate(formatted_messages):
-                    await update.message.reply_text(
-                        message.text,
-                        parse_mode=message.parse_mode,
-                        reply_markup=None,
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
-                    )
-                    if i < len(formatted_messages) - 1:
-                        await asyncio.sleep(0.5)
-
-                if images:
-                    try:
-                        await self._send_images(
-                            update,
-                            images,
-                            reply_to_message_id=update.message.message_id,
-                        )
-                    except Exception as img_err:
-                        logger.warning("Image send failed", error=str(img_err))
 
         except Exception as e:
             from .handlers.message import _format_error_message
@@ -1440,6 +1665,12 @@ class MessageOrchestrator:
 
         if not image_handler:
             await update.message.reply_text("Photo processing is not available.")
+            return
+
+        # Multi-file path: Telegram media-group items each arrive as separate
+        # Updates sharing media_group_id. Buffer them, run Claude once.
+        if update.message.media_group_id is not None:
+            await self._enqueue_photo_for_media_group(update, context, image_handler)
             return
 
         chat = update.message.chat
@@ -1498,58 +1729,13 @@ class MessageOrchestrator:
 
             context.user_data["claude_session_id"] = claude_response.session_id
 
-            from .utils.formatting import ResponseFormatter
-
-            formatter = ResponseFormatter(self.settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content
+            await self._send_claude_reply(
+                update,
+                progress_msg,
+                claude_response,
+                mcp_images_photo,
+                reply_to_message_id=update.message.message_id,
             )
-
-            try:
-                await progress_msg.delete()
-            except Exception:
-                logger.debug("Failed to delete progress message, ignoring")
-
-            # Use MCP-collected images (from send_image_to_user tool calls)
-            images: List[ImageAttachment] = mcp_images_photo
-
-            caption_sent = False
-            if images and len(formatted_messages) == 1:
-                msg = formatted_messages[0]
-                if msg.text and len(msg.text) <= 1024:
-                    try:
-                        caption_sent = await self._send_images(
-                            update,
-                            images,
-                            reply_to_message_id=update.message.message_id,
-                            caption=msg.text,
-                            caption_parse_mode=msg.parse_mode,
-                        )
-                    except Exception as img_err:
-                        logger.warning("Image+caption send failed", error=str(img_err))
-
-            if not caption_sent:
-                for i, message in enumerate(formatted_messages):
-                    await update.message.reply_text(
-                        message.text,
-                        parse_mode=message.parse_mode,
-                        reply_markup=None,
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
-                    )
-                    if i < len(formatted_messages) - 1:
-                        await asyncio.sleep(0.5)
-
-                if images:
-                    try:
-                        await self._send_images(
-                            update,
-                            images,
-                            reply_to_message_id=update.message.message_id,
-                        )
-                    except Exception as img_err:
-                        logger.warning("Image send failed", error=str(img_err))
 
         except Exception as e:
             from .handlers.message import _format_error_message

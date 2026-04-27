@@ -216,13 +216,12 @@ class FileHandler:
         shutil.copy2(file_path, dest)
 
         relative_path = f".media.telegram/{subdir}/{dest.name}"
+        from .image_handler import get_attachments_guidance
+
         prompt = (
             f"{context}\n\n"
             f"The file has been saved to `{relative_path}`. Use the Read tool to view and analyze it.\n\n"
-            "If you embed this file in an Obsidian note, copy it to the appropriate `5-Attachments/` "
-            "subfolder first (e.g. `5-Attachments/<topic>/` for medical documents, "
-            "`5-Attachments/telegram/` for general attachments, `5-Attachments/<topic>/` "
-            "for work files) and use that path in the Obsidian wikilink."
+            f"{get_attachments_guidance(self.config)}"
         )
         return ProcessedFile(
             type=media_type,

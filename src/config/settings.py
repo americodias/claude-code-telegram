@@ -49,6 +49,15 @@ class Settings(BaseSettings):
             "Disabled when unset."
         ),
     )
+    image_attachments_guidance: Optional[str] = Field(
+        None,
+        description=(
+            "Project-specific guidance text appended to the prompt when the bot "
+            "saves an uploaded image or document. When unset, a generic message "
+            "is used. Set this in your local .env to inject project-specific "
+            "subfolder conventions without leaking them into the public source."
+        ),
+    )
     allowed_users: Optional[List[int]] = Field(
         None, description="Allowed Telegram user IDs"
     )

@@ -19,13 +19,23 @@ from telegram import PhotoSize
 
 from src.config import Settings
 
-# Shared prompt fragments — also used by media_group_buffer for multi-file batches
-ATTACHMENTS_GUIDANCE = (
-    "If you embed this image in an Obsidian note, copy it to the appropriate "
-    "`5-Attachments/` subfolder first (e.g. `5-Attachments/<topic>/` for health images, "
-    "`5-Attachments/telegram/` for general photos, `5-Attachments/<topic>/` for work) "
-    "and use that path in the Obsidian wikilink."
+# Shared prompt fragments — also used by media_group_buffer for multi-file batches.
+# The default guidance is project-agnostic; downstream forks can override via the
+# IMAGE_ATTACHMENTS_GUIDANCE env var (loaded into Settings).
+DEFAULT_ATTACHMENTS_GUIDANCE = (
+    "If you embed this image in a note, copy it to the appropriate "
+    "attachments subfolder first and reference it with a relative path."
 )
+
+
+def get_attachments_guidance(config: "Settings") -> str:
+    """Return the configured guidance text, or the project-agnostic default."""
+    custom = getattr(config, "image_attachments_guidance", None)
+    return custom or DEFAULT_ATTACHMENTS_GUIDANCE
+
+
+# Backwards-compatible alias for callers that imported the previous constant.
+ATTACHMENTS_GUIDANCE = DEFAULT_ATTACHMENTS_GUIDANCE
 
 
 @dataclass
@@ -78,7 +88,7 @@ class ImageHandler:
         prompt = f"The user sent an image. I've saved it to `{relative_path}`. Use the Read tool to view and analyze it."
         if caption:
             prompt += f"\n\nCaption from user: {caption}"
-        prompt += "\n\n" + ATTACHMENTS_GUIDANCE
+        prompt += "\n\n" + get_attachments_guidance(self.config)
 
         return ProcessedImage(
             prompt=prompt,

@@ -309,6 +309,16 @@ class ClaudeSDKManager:
                     path=str(claude_md_path),
                 )
 
+            bot_context_path = (
+                Path(working_directory) / ".claude" / "bot-context.md"
+            )
+            if bot_context_path.exists():
+                base_prompt += "\n\n" + bot_context_path.read_text(encoding="utf-8")
+                logger.info(
+                    "Loaded bot-context.md into system prompt",
+                    path=str(bot_context_path),
+                )
+
             # When DISABLE_TOOL_VALIDATION=true, pass None for allowed/disallowed
             # tools so the SDK does not restrict tool usage (e.g. MCP tools).
             if self.config.disable_tool_validation:

@@ -54,9 +54,12 @@ apscheduler = "^3.10"
 PyYAML = "^6.0.2"
 mistralai = {version = "^1.0.0", optional = true}
 openai = {version = "^1.0.0", optional = true}
+elevenlabs = {version = "^1.0", optional = true}
+wyoming = {version = "^1.0", optional = true}
 
 [tool.poetry.extras]
 voice = ["mistralai", "openai"]
+tts = ["openai", "elevenlabs", "wyoming"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.0"

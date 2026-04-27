@@ -344,6 +344,7 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
+            ("tts", self.agentic_tts),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -477,6 +478,7 @@ class MessageOrchestrator:
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("repo", "List repos / switch workspace"),
+                BotCommand("tts", "TTS provider status / switch"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -646,6 +648,48 @@ class MessageOrchestrator:
             f"Verbosity set to <b>{level}</b> ({labels[level]})",
             parse_mode="HTML",
         )
+
+    async def agentic_tts(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """TTS provider management: /tts, /tts next, /tts <name>."""
+        features = context.bot_data.get("features")
+        tts_handler = features.get_tts_handler() if features else None
+
+        if not tts_handler:
+            await update.message.reply_text("TTS is not available.")
+            return
+
+        args = update.message.text.split()[1:] if update.message.text else []
+
+        if not args:
+            status = tts_handler.get_status()
+            chain_str = " → ".join(status["chain"])
+            lines = [
+                f"<b>TTS Provider:</b> {status['current']}",
+                f"<b>Chain:</b> {chain_str}",
+            ]
+            if status["failed"]:
+                for provider, info in status["failed"].items():
+                    lines.append(f"<b>{provider}:</b> {info}")
+            lines.append(
+                "\nUsage: <code>/tts next</code> or <code>/tts &lt;name&gt;</code>"
+            )
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            return
+
+        arg = args[0].lower()
+        try:
+            if arg == "next":
+                new_provider = tts_handler.next_provider()
+            else:
+                new_provider = tts_handler.switch_provider(arg)
+            await update.message.reply_text(
+                f"TTS switched to <b>{new_provider}</b>",
+                parse_mode="HTML",
+            )
+        except ValueError as e:
+            await update.message.reply_text(str(e))
 
     def _format_verbose_progress(
         self,
@@ -1447,6 +1491,7 @@ class MessageOrchestrator:
                 progress_msg=progress_msg,
                 user_id=user_id,
                 chat=chat,
+                is_voice_message=True,
             )
 
         except Exception as e:
@@ -1467,6 +1512,7 @@ class MessageOrchestrator:
         user_id: int,
         chat: Any,
         images: Optional[List[Dict[str, str]]] = None,
+        is_voice_message: bool = False,
     ) -> None:
         """Run a media-derived prompt through Claude and send responses."""
         claude_integration = context.bot_data.get("claude_integration")
@@ -1531,6 +1577,50 @@ class MessageOrchestrator:
 
         # Use MCP-collected images (from send_image_to_user tool calls).
         images: List[ImageAttachment] = mcp_images_media
+
+        # TTS voice reply — for voice-message inputs, try synthesising audio
+        # instead of sending text. Falls through to the normal text reply on
+        # failure.
+        tts_sent = False
+        if (
+            is_voice_message
+            and not images
+            and formatted_messages
+        ):
+            tts_handler = (
+                context.bot_data.get("features").get_tts_handler()
+                if context.bot_data.get("features")
+                else None
+            )
+            if tts_handler:
+                try:
+                    full_text = "\n\n".join(
+                        m.text for m in formatted_messages if m.text
+                    )
+                    if full_text.strip():
+                        await chat.send_action("record_voice")
+                        tts_result = await tts_handler.synthesise(full_text)
+                        with open(tts_result.audio_path, "rb") as audio_file:
+                            await update.message.reply_voice(
+                                voice=audio_file,
+                                reply_to_message_id=update.message.message_id,
+                            )
+                        tts_sent = True
+                        logger.info(
+                            "TTS voice reply sent",
+                            user_id=user_id,
+                            chunks=tts_result.chunks,
+                            provider=tts_result.provider,
+                        )
+                except Exception as tts_err:
+                    logger.warning(
+                        "TTS synthesis failed, falling back to text",
+                        error=str(tts_err),
+                        user_id=user_id,
+                    )
+
+        if tts_sent:
+            return
 
         caption_sent = False
         if images and len(formatted_messages) == 1:

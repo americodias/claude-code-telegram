@@ -252,6 +252,53 @@ class Settings(BaseSettings):
             "Named models resolve to ~/.cache/whisper-cpp/ggml-{name}.bin"
         ),
     )
+    tts_enabled: bool = Field(
+        True,
+        description="Send voice reply after voice messages",
+    )
+    tts_provider: str = Field(
+        "openai",
+        description="TTS provider: openai, elevenlabs, or piper",
+    )
+    tts_provider_chain: str = Field(
+        "",
+        description=(
+            "Comma-separated TTS provider fallback chain "
+            "(e.g. 'elevenlabs,piper,openai'). Overrides tts_provider when set."
+        ),
+    )
+    tts_voice: str = Field(
+        "nova",
+        description="OpenAI TTS voice (alloy, echo, fable, onyx, nova, shimmer)",
+    )
+    tts_model: str = Field(
+        "tts-1",
+        description="OpenAI TTS model: tts-1 (fast) or tts-1-hd (quality)",
+    )
+    elevenlabs_api_key: Optional[SecretStr] = Field(
+        None,
+        description="ElevenLabs API key for TTS",
+    )
+    elevenlabs_voice_id: str = Field(
+        "JBFqnCBsd6RMkjVDRZzb",
+        description="ElevenLabs voice ID (default: George)",
+    )
+    elevenlabs_model: str = Field(
+        "eleven_multilingual_v2",
+        description="ElevenLabs model (eleven_multilingual_v2 for PT+EN)",
+    )
+    piper_host: str = Field(
+        "localhost",
+        description="Piper TTS Wyoming protocol host",
+    )
+    piper_port: int = Field(
+        10200,
+        description="Piper TTS Wyoming protocol port",
+    )
+    piper_voice: str = Field(
+        "",
+        description="Piper voice name (e.g. pt_BR-faber-medium). Empty = server default.",
+    )
     enable_quick_actions: bool = Field(True, description="Enable quick action buttons")
     agentic_mode: bool = Field(
         True,
@@ -554,6 +601,15 @@ class Settings(BaseSettings):
     def openai_api_key_str(self) -> Optional[str]:
         """Get OpenAI API key as string."""
         return self.openai_api_key.get_secret_value() if self.openai_api_key else None
+
+    @property
+    def elevenlabs_api_key_str(self) -> Optional[str]:
+        """Get ElevenLabs API key as string."""
+        return (
+            self.elevenlabs_api_key.get_secret_value()
+            if self.elevenlabs_api_key
+            else None
+        )
 
     @property
     def resolved_voice_model(self) -> str:

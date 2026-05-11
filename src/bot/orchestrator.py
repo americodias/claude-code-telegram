@@ -1322,6 +1322,40 @@ class MessageOrchestrator:
         # Flag is only cleared after a successful run so retries keep the intent.
         force_new = bool(context.user_data.get("force_new_session"))
 
+        # ── Cortex shared-thread mirror ──────────────────────────────────
+        # Mirror this inbound to message_inbox and prepend any autonomous
+        # Cortex pushes (heartbeat, health-agent, etc.) sent since the
+        # user's previous message. Best-effort — failures never block reply.
+        from .handlers.message import (
+            _build_thread_prefix,
+            _fetch_autonomous_pushes_since,
+            _record_inbound_and_get_since,
+        )
+        _thread_db_path = (
+            Path(self.settings.approved_directory) / ".cortex" / "data" / "bot.db"
+        )
+        _chat_id_int = update.effective_chat.id
+        _since_ts = await asyncio.to_thread(
+            _record_inbound_and_get_since,
+            _thread_db_path,
+            _chat_id_int,
+            user_id,
+            message_text,
+        )
+        _autonomous_pushes = await asyncio.to_thread(
+            _fetch_autonomous_pushes_since,
+            _thread_db_path,
+            _chat_id_int,
+            _since_ts,
+        )
+        _thread_prefix = _build_thread_prefix(_autonomous_pushes)
+        if _thread_prefix:
+            logger.info(
+                "prepending shared-thread context",
+                push_count=len(_autonomous_pushes),
+                since_ts=_since_ts,
+            )
+
         # Inject reboot awareness into first message after reboot
         from datetime import datetime, timezone
         reboot_info = context.bot_data.get("reboot_info")
@@ -1348,6 +1382,10 @@ class MessageOrchestrator:
             message_text = f"[Current time: {time_str}]\n\n{message_text}"
         except Exception:
             pass
+
+        # Prepend autonomous-push context after all system injections
+        if _thread_prefix:
+            message_text = _thread_prefix + message_text
 
         # --- Verbose progress tracking via stream callback ---
         tool_log: List[Dict[str, Any]] = []
@@ -1414,8 +1452,13 @@ class MessageOrchestrator:
         except Exception as e:
             success = False
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
+            from ..claude.exceptions import ClaudeSessionOverflowError
             from .handlers.message import _format_error_message
             from .utils.formatting import FormattedMessage
+
+            if isinstance(e, ClaudeSessionOverflowError):
+                context.user_data["claude_session_id"] = None
+                context.user_data["force_new_session"] = False
 
             formatted_messages = [
                 FormattedMessage(_format_error_message(e), parse_mode="HTML")

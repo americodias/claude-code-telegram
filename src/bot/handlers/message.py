@@ -1,6 +1,9 @@
 """Message handlers for non-command inputs."""
 
 import asyncio
+import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import structlog
@@ -27,6 +30,114 @@ from ..utils.image_extractor import (
 )
 
 logger = structlog.get_logger()
+
+
+# ── Cortex shared-thread mirror ─────────────────────────────────────────
+#
+# Three small sync helpers (called via asyncio.to_thread) that bridge this
+# bot to Cortex's outbox + inbox tables in ~/cortex/.cortex/data/bot.db.
+# Purpose: when the user replies to an autonomous Cortex push (morning
+# brief, digest, health-agent, etc.), the Claude session spawned to handle
+# the reply needs to know what was just pushed. The outbox already stores
+# those bodies; the bot now (1) mirrors every inbound to message_inbox and
+# (2) prepends pushes sent since the user's previous message to the
+# Claude prompt. Failures NEVER block the reply path.
+
+
+def _record_inbound_and_get_since(
+    db_path: Path,
+    chat_id: int,
+    user_id: int,
+    body: str,
+) -> Optional[str]:
+    """Insert this inbound into message_inbox; return ts of the user's
+    PREVIOUS message (None on cold start). Querying happens BEFORE insert
+    so since_ts is the prior turn, not the current one."""
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            # Idempotent — cortex_lib.outbox creates these on its first import,
+            # but we mirror here in case the bot starts before any cortex_lib
+            # process has touched the DB.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS message_inbox ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "ts TEXT NOT NULL, chat_id TEXT NOT NULL, "
+                "user_id INTEGER, body TEXT NOT NULL, "
+                "surface TEXT NOT NULL DEFAULT 'telegram')"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_inbox_chat_ts "
+                "ON message_inbox(chat_id, ts)"
+            )
+            row = conn.execute(
+                "SELECT ts FROM message_inbox WHERE chat_id = ? "
+                "ORDER BY ts DESC LIMIT 1",
+                (str(chat_id),),
+            ).fetchone()
+            since_ts: Optional[str] = row[0] if row else None
+            ts_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+            conn.execute(
+                "INSERT INTO message_inbox "
+                "(ts, chat_id, user_id, body, surface) "
+                "VALUES (?, ?, ?, ?, 'telegram')",
+                (ts_iso, str(chat_id), user_id, body),
+            )
+            conn.commit()
+            return since_ts
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("inbox mirror write failed", error=str(e))
+        return None
+
+
+def _fetch_autonomous_pushes_since(
+    db_path: Path,
+    chat_id: int,
+    since_ts: Optional[str],
+) -> list[dict]:
+    """Outbound rows for chat_id with ts > since_ts. None → last 4h."""
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            cutoff = since_ts or (
+                datetime.now().astimezone() - timedelta(hours=4)
+            ).isoformat(timespec="seconds")
+            rows = conn.execute(
+                "SELECT ts, source, body FROM message_outbox "
+                "WHERE chat_id = ? AND suppressed = 0 AND ts > ? "
+                "ORDER BY ts ASC",
+                (str(chat_id), cutoff),
+            ).fetchall()
+            return [{"ts": r[0], "source": r[1], "body": r[2]} for r in rows]
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("outbox read failed", error=str(e))
+        return []
+
+
+def _build_thread_prefix(pushes: list[dict]) -> str:
+    """Render autonomous-push context as a block for the Claude prompt."""
+    if not pushes:
+        return ""
+    lines = [
+        "[Autonomous messages I (Cortex) sent to you since your previous message]"
+    ]
+    for p in pushes:
+        ts = p.get("ts", "")
+        hhmm = ts[11:16] if len(ts) >= 16 else ts
+        src = p.get("source") or "unknown"
+        body = (p.get("body") or "").rstrip()
+        lines.append(f"[{hhmm} from `{src}`] {body}")
+    lines.append(
+        "[End of context. The next line is the user's current message — "
+        "reply to that, treating the block above as background.]"
+    )
+    lines.append("")  # blank line then the user's text
+    return "\n".join(lines) + "\n"
 
 
 async def _format_progress_update(update_obj) -> Optional[str]:
@@ -384,10 +495,42 @@ async def handle_text_message(
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
+        # ── Cortex shared-thread context ────────────────────────────
+        # Mirror this inbound and prepend autonomous pushes that landed
+        # since the user's previous message. Both helpers are best-effort
+        # and never block the reply path on failure.
+        thread_db_path = (
+            Path(settings.approved_directory) / ".cortex" / "data" / "bot.db"
+        )
+        chat_id_int = update.effective_chat.id
+        since_ts = await asyncio.to_thread(
+            _record_inbound_and_get_since,
+            thread_db_path,
+            chat_id_int,
+            user_id,
+            message_text,
+        )
+        autonomous_pushes = await asyncio.to_thread(
+            _fetch_autonomous_pushes_since,
+            thread_db_path,
+            chat_id_int,
+            since_ts,
+        )
+        thread_prefix = _build_thread_prefix(autonomous_pushes)
+        augmented_prompt = (
+            thread_prefix + message_text if thread_prefix else message_text
+        )
+        if thread_prefix:
+            logger.info(
+                "prepending shared-thread context",
+                push_count=len(autonomous_pushes),
+                since_ts=since_ts,
+            )
+
         # Run Claude command
         try:
             claude_response = await claude_integration.run_command(
-                prompt=message_text,
+                prompt=augmented_prompt,
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=session_id,

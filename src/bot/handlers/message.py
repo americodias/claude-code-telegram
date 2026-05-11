@@ -16,6 +16,7 @@ from ...claude.exceptions import (
     ClaudeParsingError,
     ClaudeProcessError,
     ClaudeSessionError,
+    ClaudeSessionOverflowError,
     ClaudeTimeoutError,
 )
 from ...config.settings import Settings
@@ -44,22 +45,18 @@ logger = structlog.get_logger()
 # Claude prompt. Failures NEVER block the reply path.
 
 
-def _record_inbound_and_get_since(
-    db_path: Path,
-    chat_id: int,
-    user_id: int,
-    body: str,
-) -> Optional[str]:
-    """Insert this inbound into message_inbox; return ts of the user's
-    PREVIOUS message (None on cold start). Querying happens BEFORE insert
-    so since_ts is the prior turn, not the current one."""
+def ensure_inbox_schema(db_path: Path) -> None:
+    """Create message_inbox table and index if they do not exist.
+
+    Called ONCE at bot startup (before polling begins) so DDL never races
+    with the SQLAlchemy ORM's write transactions on the per-message path.
+    Safe to call when the DB does not exist yet.
+    """
     try:
-        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        conn = sqlite3.connect(str(db_path), timeout=15.0)
         try:
-            conn.execute("PRAGMA busy_timeout=5000")
-            # Idempotent — cortex_lib.outbox creates these on its first import,
-            # but we mirror here in case the bot starts before any cortex_lib
-            # process has touched the DB.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS message_inbox ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -71,6 +68,26 @@ def _record_inbound_and_get_since(
                 "CREATE INDEX IF NOT EXISTS idx_inbox_chat_ts "
                 "ON message_inbox(chat_id, ts)"
             )
+            conn.commit()
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("inbox schema init failed", error=str(e))
+
+
+def _record_inbound_and_get_since(
+    db_path: Path,
+    chat_id: int,
+    user_id: int,
+    body: str,
+) -> Optional[str]:
+    """Insert this inbound into message_inbox; return ts of the user's
+    PREVIOUS message (None on cold start). Querying happens BEFORE insert
+    so since_ts is the prior turn, not the current one."""
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=15.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
             row = conn.execute(
                 "SELECT ts FROM message_inbox WHERE chat_id = ? "
                 "ORDER BY ts DESC LIMIT 1",
@@ -245,6 +262,13 @@ def _format_error_message(error: Exception | str) -> str:
             "• Check that the MCP server is running and reachable\n"
             "• Verify <code>MCP_CONFIG_PATH</code> points to a valid config\n"
             "• Ask the administrator to check MCP server logs"
+        )
+
+    if isinstance(error_obj, ClaudeSessionOverflowError):
+        return (
+            "⚠️ <b>Sessão reiniciada</b>\n\n"
+            "A sessão ficou demasiado grande e foi limpa automaticamente.\n"
+            "Repete a última mensagem — vou responder com contexto limpo."
         )
 
     if isinstance(error_obj, ClaudeParsingError):
@@ -574,6 +598,10 @@ async def handle_text_message(
         except Exception as e:
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
             from ..utils.formatting import FormattedMessage
+
+            if isinstance(e, ClaudeSessionOverflowError):
+                context.user_data["claude_session_id"] = None
+                context.user_data["force_new_session"] = False
 
             formatted_messages = [
                 FormattedMessage(_format_error_message(e), parse_mode="HTML")

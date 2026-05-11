@@ -235,6 +235,17 @@ async def run_application(app: Dict[str, Any]) -> None:
         # Initialize the bot first (creates the Telegram Application)
         await bot.initialize()
 
+        # Ensure message_inbox schema exists before any messages arrive.
+        # Done here (post-ORM-init, pre-polling) so the DDL never races
+        # with SQLAlchemy write transactions on the per-message hot path.
+        _thread_db_path = (
+            Path(config.approved_directory) / ".cortex" / "data" / "bot.db"
+        )
+        if _thread_db_path.parent.exists():
+            from src.bot.handlers.message import ensure_inbox_schema
+            await asyncio.to_thread(ensure_inbox_schema, _thread_db_path)
+            logger.info("Inbox schema initialized", db_path=str(_thread_db_path))
+
         if config.enable_project_threads:
             if not config.projects_config_path:
                 raise ConfigurationError(

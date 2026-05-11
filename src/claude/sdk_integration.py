@@ -34,6 +34,7 @@ from .exceptions import (
     ClaudeMCPError,
     ClaudeParsingError,
     ClaudeProcessError,
+    ClaudeSessionOverflowError,
     ClaudeTimeoutError,
 )
 from .monitor import _is_claude_internal_path, check_bash_directory_boundary
@@ -437,8 +438,17 @@ class ClaudeSDKManager:
             raise ClaudeProcessError(f"Failed to connect to Claude: {error_str}")
 
         except CLIJSONDecodeError as e:
-            logger.error("Claude SDK JSON decode error", error=str(e))
-            raise ClaudeParsingError(f"Failed to decode Claude response: {str(e)}")
+            error_str = str(e)
+            logger.error("Claude SDK JSON decode error", error=error_str)
+            if "maximum buffer size" in error_str:
+                logger.warning(
+                    "Session context exceeded 1 MB buffer limit — session should be cleared",
+                    session_id=session_id,
+                )
+                raise ClaudeSessionOverflowError(
+                    f"Session context too large for Claude CLI buffer: {error_str}"
+                )
+            raise ClaudeParsingError(f"Failed to decode Claude response: {error_str}")
 
         except ClaudeSDKError as e:
             logger.error("Claude SDK error", error=str(e))

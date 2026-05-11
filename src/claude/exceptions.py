@@ -17,6 +17,13 @@ class ClaudeParsingError(ClaudeError):
     """Failed to parse output."""
 
 
+class ClaudeSessionOverflowError(ClaudeParsingError):
+    """Session context exceeded the Claude CLI JSON buffer limit (1 MB).
+
+    Callers should clear the session and prompt the user to retry.
+    """
+
+
 class ClaudeSessionError(ClaudeError):
     """Session management error."""
 
